@@ -31,6 +31,11 @@ HANDOFF.md
 _shots/
 _seed/
 *.log
+# 本机 AI 工具配置与记忆
+.trae/
+.workbuddy/
+# 调试截图
+agreement.png
 
 # ---- 系统垃圾 ----
 .DS_Store

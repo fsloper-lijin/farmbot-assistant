@@ -26,7 +26,14 @@ object Ocr {
 
     data class ScanLine(val text: String, val box: Rect)
 
-    private val SERVER = Regex("^(手Q|微信)")
+    /**
+     * 区服行锚点：行内出现「手Q/微信」即视为区服行，**不锚定行首**。
+     * 「我的服务器」里上次登录的区服前面带 ◆ 标记（如「◆微信王者抢先服」），
+     * 锚定 ^(手Q|微信) 会把这一行整行丢掉 —— 抢先服没有区号，正是靠这条匹配。
+     */
+    private val SERVER = Regex("(手Q|微信)")
+    /** 行首装饰符号（◆ 上次登录标记、项目符号等），入库前去掉 */
+    private val LEADING_JUNK = Regex("^[◆◇•·▪◦★☆＊*\\-—~\\s]+")
     private val LEVEL = Regex("Lv\\.?\\s*(\\d+)")
     private val ROLE = Regex("Lv\\.?\\s*\\d+\\s*(.*)")
 
@@ -64,7 +71,7 @@ object Ocr {
         for (s in servers) {
             val below = partnerOf(s, lines) ?: continue
             val parsed = parseLevelRole(below.text) ?: continue
-            val server = s.text.trim().replace(Regex("\\s+"), " ")
+            val server = serverName(s.text)
             out.putIfAbsent(
                 server,
                 Farm(server = server, role = parsed.second, level = parsed.first)
@@ -72,6 +79,10 @@ object Ocr {
         }
         return out.values.toList()
     }
+
+    /** 区服名规范化：压空白 + 去掉行首 ◆ 之类的装饰符号 */
+    private fun serverName(raw: String): String =
+        raw.trim().replace(Regex("\\s+"), " ").replace(LEADING_JUNK, "").trim()
 
     /** 有等级行、但上方找不到区服名称行的孤立项 —— 需要局部放大补识别 */
     fun orphans(lines: List<ScanLine>): List<ScanLine> {
@@ -100,7 +111,7 @@ object Ocr {
 
     fun nameOf(line: String): String? {
         val t = line.trim()
-        return if (SERVER.containsMatchIn(t)) t.replace(Regex("\\s+"), " ") else null
+        return if (SERVER.containsMatchIn(t)) serverName(t) else null
     }
 
     private fun partnerOf(s: ScanLine, lines: List<ScanLine>): ScanLine? =

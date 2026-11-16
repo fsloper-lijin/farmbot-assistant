@@ -18,7 +18,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -41,6 +46,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.farmbot.assistant.data.Account
@@ -60,67 +66,142 @@ import com.farmbot.assistant.ui.theme.Warn
 @Composable
 fun AccountScreen(
     accounts: List<Account>,
-    accessibilityOn: Boolean,
     scanResult: List<Farm>?,
     scanTarget: String,
     onAdd: () -> Unit,
     onChange: (Account) -> Unit,
     onRemove: (String) -> Unit,
-    onOpenAccessibility: () -> Unit,
+    /** 调整执行顺序：id, -1 上移（提前执行）/ +1 下移 */
+    onMove: (String, Int) -> Unit,
     onScan: (Account) -> Unit,
+    onTestLogin: (Account) -> Unit,
     onApplyScan: () -> Unit,
     onDismissScan: () -> Unit,
     onStart: () -> Unit,
+    /** 自动化是否在跑；决定「停止」按钮是否可点 */
+    running: Boolean,
+    onStop: () -> Unit,
     onOpenPerms: () -> Unit,
 ) {
     val farmCount = accounts.sumOf { it.farms.size }
     val selected = accounts.sumOf { it.activeFarms.size }
+    val wide = isWideScreen()
+    val pad = if (wide) 28.dp else 18.dp
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Bg)
+            .background(Bg),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Header(accounts.size, farmCount, selected, onOpenPerms)
-        LazyColumn(
-            modifier = Modifier.weight(1f),
-            contentPadding = PaddingValues(start = 18.dp, end = 18.dp, bottom = 28.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            item { StatusCard(accessibilityOn, onOpenAccessibility) }
+        Header(accounts.size, farmCount, selected, onOpenPerms, pad)
+        val listModifier = Modifier
+            .weight(1f)
+            .widthIn(max = ContentMaxWidth)
+            .fillMaxWidth()
+        if (wide) {
+            // 平板：账号卡片按列铺开，单张卡片不至于横向拉满整屏
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(560.dp),
+                modifier = listModifier,
+                contentPadding = PaddingValues(start = pad, end = pad, bottom = 28.dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    AddAccountButton(onAdd)
+                }
 
-            if (scanResult != null) {
-                item { ScanBanner(scanResult.size, scanTarget, onApplyScan, onDismissScan) }
+                if (scanResult != null) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        ScanBanner(scanResult.size, scanTarget, onApplyScan, onDismissScan)
+                    }
+                }
+
+                if (accounts.isEmpty()) {
+                    item(span = { GridItemSpan(maxLineSpan) }) { EmptyHint() }
+                }
+
+                gridItemsIndexed(accounts, key = { _, a -> a.id }) { index, acc ->
+                    AccountCard(
+                        index = index,
+                        acc = acc,
+                        canUp = index > 0,
+                        canDown = index < accounts.lastIndex,
+                        // 微信同一时间只能登录一个账号：已有别的微信账号时禁止再选微信
+                        wxTaken = accounts.any { it.id != acc.id && (it.loginType == LoginType.WECHAT || it.loginType == LoginType.WECHAT_QR) },
+                        onChange = onChange,
+                        onRemove = { onRemove(acc.id) },
+                        onMoveUp = { onMove(acc.id, -1) },
+                        onMoveDown = { onMove(acc.id, 1) },
+                        onScan = { onScan(acc) },
+                        onTestLogin = { onTestLogin(acc) }
+                    )
+                }
+
+                item(span = { GridItemSpan(maxLineSpan) }) { FooterNote() }
             }
+        } else {
+            LazyColumn(
+                modifier = listModifier,
+                contentPadding = PaddingValues(start = pad, end = pad, bottom = 28.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                item { AddAccountButton(onAdd) }
 
-            if (accounts.isEmpty()) {
-                item { EmptyHint() }
+                if (scanResult != null) {
+                    item { ScanBanner(scanResult.size, scanTarget, onApplyScan, onDismissScan) }
+                }
+
+                if (accounts.isEmpty()) {
+                    item { EmptyHint() }
+                }
+
+                itemsIndexed(accounts, key = { _, a -> a.id }) { index, acc ->
+                    AccountCard(
+                        index = index,
+                        acc = acc,
+                        canUp = index > 0,
+                        canDown = index < accounts.lastIndex,
+                        // 微信同一时间只能登录一个账号：已有别的微信账号时禁止再选微信
+                        wxTaken = accounts.any { it.id != acc.id && (it.loginType == LoginType.WECHAT || it.loginType == LoginType.WECHAT_QR) },
+                        onChange = onChange,
+                        onRemove = { onRemove(acc.id) },
+                        onMoveUp = { onMove(acc.id, -1) },
+                        onMoveDown = { onMove(acc.id, 1) },
+                        onScan = { onScan(acc) },
+                        onTestLogin = { onTestLogin(acc) }
+                    )
+                }
+
+                item { FooterNote() }
             }
-
-            itemsIndexed(accounts, key = { _, a -> a.id }) { index, acc ->
-                AccountCard(
-                    index = index,
-                    acc = acc,
-                    onChange = onChange,
-                    onRemove = { onRemove(acc.id) },
-                    onScan = { onScan(acc) }
-                )
-            }
-
-            item { AddAccountButton(onAdd) }
-            item { FooterNote() }
         }
 
         BottomBar(
             count = selected,
-            enabled = selected > 0,
-            onStart = onStart
+            // 三种情况可点：
+            //   有选中农场 → 正常执行任务；
+            //   账号非空但没选农场 → 自动登录第一个启用账号（不需要先选农场）；
+            //   一个账号都没有 → 走「登录 → 自动识别账号 → 同步区服」的引导
+            enabled = selected > 0 || accounts.isNotEmpty(),
+            running = running,
+            onStart = onStart,
+            onStop = onStop,
+            pad = pad
         )
     }
 }
 
 @Composable
-private fun BottomBar(count: Int, enabled: Boolean, onStart: () -> Unit) {
+private fun BottomBar(
+    count: Int,
+    enabled: Boolean,
+    running: Boolean,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+    pad: Dp,
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -132,37 +213,66 @@ private fun BottomBar(count: Int, enabled: Boolean, onStart: () -> Unit) {
                 .height(1.dp)
                 .background(Line)
         )
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 18.dp, vertical = 12.dp)
-                .height(50.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(if (enabled) Cyan else Surface2)
-                .clickable(enabled = enabled) { onStart() },
-            contentAlignment = Alignment.Center
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "开始执行",
-                    color = if (enabled) Color(0xFF04262B) else TextTertiary,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium
-                )
-                if (count > 0) {
-                    Spacer(Modifier.width(8.dp))
-                    Box(
-                        Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(Color(0xFF04262B).copy(alpha = if (enabled) 0.16f else 0.35f))
-                            .padding(horizontal = 7.dp, vertical = 2.dp)
-                    ) {
+        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            Row(
+                modifier = Modifier
+                    .widthIn(max = ActionMaxWidth)
+                    .fillMaxWidth()
+                    .padding(horizontal = pad, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(50.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (enabled) Cyan else Surface2)
+                        .clickable(enabled = enabled) { onStart() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            "$count 个农场",
+                            "开始执行",
                             color = if (enabled) Color(0xFF04262B) else TextTertiary,
-                            fontSize = 11.sp
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium
                         )
+                        if (count > 0) {
+                            Spacer(Modifier.width(8.dp))
+                            Box(
+                                Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(Color(0xFF04262B).copy(alpha = if (enabled) 0.16f else 0.35f))
+                                    .padding(horizontal = 7.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    "$count 个农场",
+                                    color = if (enabled) Color(0xFF04262B) else TextTertiary,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
                     }
+                }
+
+                Spacer(Modifier.width(10.dp))
+
+                // 强制停止：只在自动化运行中可点，空闲时保持灰色
+                Box(
+                    modifier = Modifier
+                        .width(68.dp)
+                        .height(42.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Surface2)
+                        .border(1.dp, Line, RoundedCornerShape(12.dp))
+                        .clickable(enabled = running) { onStop() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "停止",
+                        color = if (running) TextPrimary else TextTertiary.copy(alpha = 0.45f),
+                        fontSize = 13.sp
+                    )
                 }
             }
         }
@@ -170,11 +280,12 @@ private fun BottomBar(count: Int, enabled: Boolean, onStart: () -> Unit) {
 }
 
 @Composable
-private fun Header(accounts: Int, farms: Int, selected: Int, onOpenPerms: () -> Unit) {
+private fun Header(accounts: Int, farms: Int, selected: Int, onOpenPerms: () -> Unit, pad: Dp) {
     Row(
         modifier = Modifier
+            .widthIn(max = ContentMaxWidth)
             .fillMaxWidth()
-            .padding(horizontal = 18.dp, vertical = 18.dp),
+            .padding(horizontal = pad, vertical = 18.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
@@ -207,40 +318,21 @@ private fun Header(accounts: Int, farms: Int, selected: Int, onOpenPerms: () -> 
     }
 }
 
+/** 调整执行顺序的小箭头：上移 = 提前执行，下移 = 与后一个账号交换；不可用时置灰且不响应点击 */
 @Composable
-private fun StatusCard(on: Boolean, onClick: () -> Unit) {
-    val c = if (on) Cyan else Warn
-    Row(
+private fun MoveArrow(up: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(c.copy(alpha = 0.08f))
-            .border(1.dp, c.copy(alpha = 0.28f), RoundedCornerShape(14.dp))
-            .clickable { onClick() }
-            .padding(horizontal = 14.dp, vertical = 13.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .size(30.dp)
+            .clip(CircleShape)
+            .clickable(enabled = enabled) { onClick() },
+        contentAlignment = Alignment.Center
     ) {
-        Box(
-            Modifier
-                .size(7.dp)
-                .clip(CircleShape)
-                .background(c)
+        Text(
+            if (up) "↑" else "↓",
+            color = if (enabled) TextSecondary else TextTertiary.copy(alpha = 0.35f),
+            fontSize = 15.sp
         )
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                if (on) "无障碍服务已开启" else "无障碍服务未开启",
-                color = TextPrimary,
-                fontSize = 14.sp
-            )
-            Spacer(Modifier.height(2.dp))
-            Text(
-                if (on) "点击前往系统设置查看" else "点击前往设置开启，否则无法模拟点击",
-                color = TextSecondary,
-                fontSize = 12.sp
-            )
-        }
-        Text("›", color = c, fontSize = 18.sp)
     }
 }
 
@@ -248,12 +340,20 @@ private fun StatusCard(on: Boolean, onClick: () -> Unit) {
 private fun AccountCard(
     index: Int,
     acc: Account,
+    wxTaken: Boolean,
+    /** 第一个账号不能上移、最后一个不能下移；只有一个账号时两个都不可点（置灰） */
+    canUp: Boolean,
+    canDown: Boolean,
     onChange: (Account) -> Unit,
     onRemove: () -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
     onScan: () -> Unit,
+    onTestLogin: () -> Unit,
 ) {
     var expanded by remember(acc.id) { mutableStateOf(true) }
-    val accent = if (acc.loginType == LoginType.QQ) Cyan else Purple
+    val isQQ = acc.loginType == LoginType.QQ || acc.loginType == LoginType.QQ_QR
+    val accent = if (isQQ) Cyan else Purple
     val shape = RoundedCornerShape(18.dp)
 
     Column(
@@ -275,28 +375,11 @@ private fun AccountCard(
                 Text("${index + 1}", color = accent, fontSize = 12.sp, fontWeight = FontWeight.Medium)
             }
             Spacer(Modifier.width(10.dp))
-            Box(Modifier.weight(1f)) {
-                if (acc.name.isEmpty()) {
-                    Text(
-                        "账号备注，如：主号",
-                        color = TextTertiary,
-                        fontSize = 15.sp,
-                        modifier = Modifier.padding(vertical = 2.dp)
-                    )
-                }
-                BasicTextField(
-                    value = acc.name,
-                    onValueChange = { onChange(acc.copy(name = it)) },
-                    singleLine = true,
-                    textStyle = TextStyle(
-                        color = TextPrimary,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium
-                    ),
-                    cursorBrush = SolidColor(accent),
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
+            // 先选登录方式：执行时会按这里的方式登进去，再自动回填账号名
+            LoginTypePicker(acc.loginType, accent, wxTaken) { onChange(acc.copy(loginType = it)) }
+            Spacer(Modifier.weight(1f))
+            MoveArrow(up = true, enabled = canUp, onClick = onMoveUp)
+            MoveArrow(up = false, enabled = canDown, onClick = onMoveDown)
             Box(
                 modifier = Modifier
                     .size(30.dp)
@@ -308,14 +391,49 @@ private fun AccountCard(
             }
         }
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(10.dp))
 
         Row(verticalAlignment = Alignment.CenterVertically) {
-            LoginTypePicker(acc.loginType, accent) { onChange(acc.copy(loginType = it)) }
-            Spacer(Modifier.width(8.dp))
+            // 左边是这个账号本身的名字：QQ 账号昵称（微信账号就是微信昵称）
+            val nick = if (isQQ) acc.qqNick else acc.name
+            Box(Modifier.weight(1f)) {
+                if (nick.isEmpty()) {
+                    Text(
+                        if (isQQ) "QQ 昵称，如：主号" else "微信昵称，如：主号",
+                        color = TextTertiary,
+                        fontSize = 15.sp,
+                        modifier = Modifier.padding(vertical = 2.dp)
+                    )
+                }
+                BasicTextField(
+                    value = nick,
+                    onValueChange = {
+                        onChange(if (isQQ) acc.copy(qqNick = it) else acc.copy(name = it))
+                    },
+                    singleLine = true,
+                    textStyle = TextStyle(
+                        color = TextPrimary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium
+                    ),
+                    cursorBrush = SolidColor(accent),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            // 右边是这个账号授权给游戏的哪个身份。微信没有多身份，省掉
+            if (isQQ) {
+                Spacer(Modifier.width(8.dp))
+                IdentityPicker(acc.name, acc.identities, accent) { onChange(acc.copy(name = it)) }
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Row(
                 modifier = Modifier
-                    .weight(1f)
                     .clip(RoundedCornerShape(10.dp))
                     .clickable { expanded = !expanded }
                     .padding(horizontal = 8.dp, vertical = 9.dp),
@@ -327,7 +445,7 @@ private fun AccountCard(
                     color = if (acc.farms.isEmpty()) TextTertiary else TextSecondary,
                     fontSize = 12.sp
                 )
-                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.width(6.dp))
                 Text(
                     if (expanded) "收起" else "展开",
                     color = TextSecondary,
@@ -363,6 +481,8 @@ private fun AccountCard(
 
             Spacer(Modifier.height(4.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
+                MiniButton("试登录", accent, onTestLogin)
+                Spacer(Modifier.width(6.dp))
                 MiniButton("＋ 添加农场", accent) {
                     onChange(acc.copy(farms = acc.farms + Farm()))
                 }
@@ -482,7 +602,12 @@ private fun Caret(up: Boolean, color: Color) {
 }
 
 @Composable
-private fun LoginTypePicker(value: LoginType, accent: Color, onChange: (LoginType) -> Unit) {
+private fun LoginTypePicker(
+    value: LoginType,
+    accent: Color,
+    wxTaken: Boolean,
+    onChange: (LoginType) -> Unit,
+) {
     var open by remember { mutableStateOf(false) }
     Box {
         Row(
@@ -505,16 +630,84 @@ private fun LoginTypePicker(value: LoginType, accent: Color, onChange: (LoginTyp
             border = BorderStroke(1.dp, Line),
         ) {
             LoginType.entries.forEach { t ->
+                val wx = t == LoginType.WECHAT || t == LoginType.WECHAT_QR
+                val blocked = wx && wxTaken
                 DropdownMenuItem(
+                    enabled = !blocked,
                     text = {
                         Text(
-                            t.label,
-                            color = if (t == value) Cyan else TextPrimary,
+                            if (blocked) "${t.label}（微信仅支持一个账号）" else t.label,
+                            color = when {
+                                blocked -> TextTertiary
+                                t == value -> Cyan
+                                else -> TextPrimary
+                            },
                             fontSize = 14.sp
                         )
                     },
                     onClick = {
+                        if (blocked) return@DropdownMenuItem
                         onChange(t)
+                        open = false
+                    }
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 游戏身份选择：选项来自 QQ 授权页那张「你可以使用不同的头像/昵称登录」列表，
+ * 第一个是 QQ 原始身份，后面是「创建」出来的分身。微信没有这个，不显示本组件。
+ */
+@Composable
+private fun IdentityPicker(
+    value: String,
+    options: List<String>,
+    accent: Color,
+    onChange: (String) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    // 还没抓到身份列表时，把已知的名字当成唯一选项，避免出现点了没反应的空下拉
+    val choices = options.ifEmpty { if (value.isEmpty()) emptyList() else listOf(value) }
+    Box {
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(10.dp))
+                .background(Surface2)
+                .clickable(enabled = choices.isNotEmpty()) { open = true }
+                .padding(horizontal = 12.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                value.ifEmpty { "身份未识别" },
+                color = if (value.isEmpty()) TextTertiary else accent,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium
+            )
+            if (choices.isNotEmpty()) {
+                Spacer(Modifier.width(8.dp))
+                Caret(up = false, color = TextSecondary)
+            }
+        }
+        DropdownMenu(
+            expanded = open,
+            onDismissRequest = { open = false },
+            shape = RoundedCornerShape(12.dp),
+            containerColor = Surface2,
+            border = BorderStroke(1.dp, Line),
+        ) {
+            choices.forEachIndexed { i, name ->
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            if (i == 0) "$name（QQ 原始身份）" else name,
+                            color = if (name == value) Cyan else TextPrimary,
+                            fontSize = 14.sp
+                        )
+                    },
+                    onClick = {
+                        onChange(name)
                         open = false
                     }
                 )
@@ -636,7 +829,7 @@ private fun EmptyHint() {
         contentAlignment = Alignment.Center
     ) {
         Text(
-            "还没有账号\n点击下方「添加账号」，每个账号对应一次独立的王者荣耀登录",
+            "还没有账号\n点击上方「添加账号」，每个账号对应一次独立的王者荣耀登录",
             color = TextTertiary,
             fontSize = 13.sp,
             lineHeight = 20.sp,

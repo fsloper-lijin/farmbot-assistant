@@ -6,9 +6,11 @@ import org.json.JSONObject
 import java.io.File
 import java.util.UUID
 
-enum class LoginType(val label: String) {
-    QQ("QQ 登录"),
-    WECHAT("微信登录");
+enum class LoginType(val label: String, val qr: Boolean) {
+    QQ("QQ 登录", false),
+    WECHAT("微信登录", false),
+    QQ_QR("QQ 扫码登录", true),
+    WECHAT_QR("微信扫码登录", true);
 
     companion object {
         fun fromName(n: String?): LoginType =
@@ -37,8 +39,16 @@ data class Farm(
 /** 一个账号 = 一次独立的王者荣耀登录身份，可下辖多个区服农场 */
 data class Account(
     val id: String = UUID.randomUUID().toString(),
+    /** 游戏内昵称（大厅右上角显示的名字，可能是 QQ 账号下创建的登录身份，如「大号」「小号」） */
     val name: String = "",
+    /** QQ 昵称（QQ 切号列表里显示的名字）。游戏身份名 ≠ QQ 昵称时用于选对 QQ 账号 */
+    val qqNick: String = "",
     val loginType: LoginType = LoginType.QQ,
+    /**
+     * 该 QQ 账号下可选的游戏身份（QQ 授权页「你可以使用不同的头像/昵称登录」那张列表里的昵称）。
+     * 第一个通常是 QQ 原始身份，后面是用「创建」做出来的分身。微信没有这个概念，恒为空。
+     */
+    val identities: List<String> = emptyList(),
     val farms: List<Farm> = emptyList(),
     val enabled: Boolean = true,
 ) {
@@ -73,7 +83,11 @@ class AccountStore(private val ctx: Context) {
         return Account(
             id = o.optString("id", UUID.randomUUID().toString()),
             name = o.optString("name", ""),
+            qqNick = o.optString("qqNick", ""),
             loginType = LoginType.fromName(o.optString("loginType")),
+            identities = o.optJSONArray("identities")?.let { arr ->
+                (0 until arr.length()).map { i -> arr.optString(i, "") }.filter { it.isNotEmpty() }
+            } ?: emptyList(),
             farms = farms,
             enabled = o.optBoolean("enabled", true),
         )
@@ -86,8 +100,12 @@ class AccountStore(private val ctx: Context) {
                 arr.put(JSONObject().apply {
                     put("id", a.id)
                     put("name", a.name)
+                    if (a.qqNick.isNotEmpty()) put("qqNick", a.qqNick)
                     put("loginType", a.loginType.name)
                     put("enabled", a.enabled)
+                    if (a.identities.isNotEmpty()) put("identities", JSONArray().apply {
+                        a.identities.forEach { put(it) }
+                    })
                     put("farms", JSONArray().apply {
                         a.farms.forEach { f ->
                             put(JSONObject().apply {

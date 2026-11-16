@@ -15,7 +15,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -40,190 +45,189 @@ import com.farmbot.assistant.ui.theme.Warn
 @Composable
 fun PermissionScreen(
     accessibility: Boolean,
+    /** 授权还在、服务却被系统解除绑定：重开开关无效，只能重启设备 */
+    accessibilityStuck: Boolean,
     notifications: Boolean,
     overlay: Boolean,
-    manual: Boolean,
+    bgPopup: Boolean,
     alarm: Boolean,
     autoStart: Boolean,
-    autoStartKnown: Boolean,
-    lock: Boolean,
+    battery: Boolean,
     tile: Boolean,
-    onAutoGrant: () -> Unit,
+    /** 测试闹钟剩余秒数，>0 表示正在等待触发 */
+    alarmRemain: Long,
+    onRefresh: () -> Unit,
     onAccessibility: () -> Unit,
     onNotification: () -> Unit,
     onOverlay: () -> Unit,
-    onManualOpen: () -> Unit,
-    onManualToggle: (Boolean) -> Unit,
+    onBgPopup: () -> Unit,
     onAlarm: () -> Unit,
+    onAlarmTest: () -> Unit,
+    onAlarmOpen: () -> Unit,
     onAutoStart: () -> Unit,
-    onAutoStartToggle: (Boolean) -> Unit,
-    onLock: () -> Unit,
-    onLockToggle: (Boolean) -> Unit,
+    onBattery: () -> Unit,
     onTile: () -> Unit,
     onEnter: () -> Unit,
 ) {
-    // 必开项（参与放行判断）：无障碍 / 通知 / 悬浮窗
-    val required = listOf(accessibility, notifications, overlay)
-    val done = required.count { it } + if (manual) 1 else 0
-    val missing = required.count { !it }
+    val missing = listOf(accessibility, notifications, overlay).count { !it }
     val ready = missing == 0
+    val wide = isWideScreen()
+    val pad = if (wide) 28.dp else 18.dp
 
-    // 可选增强项（不参与放行判断）
-    val optional = listOf(alarm, autoStart, lock, tile)
-    val optDone = optional.count { it }
+    val testing = alarmRemain > 0
+    val entries = listOf(
+        PermEntry(
+            title = "无障碍服务",
+            desc = if (accessibilityStuck)
+                "授权还在，但系统已解除绑定。重开开关、重装都无效，重启平板才能恢复"
+            else "截屏识别与模拟点击",
+            ok = accessibility,
+            // 不参与放行判断（账号管理还能用），只把真实状态摆出来
+            statusText = if (accessibilityStuck) "需重启设备" else null,
+            onClick = onAccessibility
+        ),
+        PermEntry(
+            title = "通知权限",
+            desc = "扫描与执行结果通过通知回传",
+            ok = notifications,
+            onClick = onNotification
+        ),
+        PermEntry(
+            title = "悬浮窗",
+            desc = "在游戏画面上显示控制按钮",
+            ok = overlay,
+            onClick = onOverlay
+        ),
+        PermEntry(
+            title = "后台弹出界面",
+            desc = "允许从后台把助手界面顶到前台",
+            ok = bgPopup,
+            optional = true,
+            onClick = onBgPopup
+        ),
+        PermEntry(
+            title = "定时提醒（精确闹钟）",
+            desc = when {
+                !alarm -> "到点准点提醒你解锁手机"
+                testing -> "闹钟将在约 $alarmRemain 秒后响铃"
+                else -> "创建一个约 1 分钟后的真实闹钟"
+            },
+            ok = alarm,
+            optional = true,
+            onClick = when {
+                !alarm -> onAlarm
+                testing -> onAlarmOpen
+                else -> onAlarmTest
+            },
+            actionText = when {
+                !alarm -> null
+                testing -> "打开时钟"
+                else -> "试一下"
+            },
+            onAction = when {
+                !alarm -> null
+                testing -> onAlarmOpen
+                else -> onAlarmTest
+            }
+        ),
+        PermEntry(
+            title = "自启动",
+            desc = "允许系统在后台拉起助手",
+            ok = autoStart,
+            optional = true,
+            onClick = onAutoStart
+        ),
+        PermEntry(
+            title = "省电策略",
+            desc = "设为「无限制」，避免后台被清理",
+            ok = battery,
+            optional = true,
+            onClick = onBattery
+        ),
+        PermEntry(
+            title = "无障碍保活开关",
+            desc = "在快捷面板加一个磁贴，降低服务被回收的概率",
+            ok = tile,
+            optional = true,
+            onClick = onTile
+        ),
+    )
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Bg)
+            .background(Bg),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Row(
             modifier = Modifier
+                .widthIn(max = ContentMaxWidth)
                 .fillMaxWidth()
-                .padding(horizontal = 18.dp, vertical = 18.dp),
+                .padding(horizontal = pad, vertical = 18.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(Modifier.weight(1f)) {
-                Text("权限准备", color = TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.Medium)
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "前三项全开才能进入；下方增强项可跳过",
-                    color = TextSecondary,
-                    fontSize = 12.sp
-                )
-            }
+            Text(
+                "权限准备",
+                color = TextPrimary,
+                fontSize = if (wide) 28.sp else 24.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.weight(1f)
+            )
             Box(
                 Modifier
                     .clip(RoundedCornerShape(10.dp))
-                    .background((if (ready) Cyan else Warn).copy(alpha = 0.12f))
-                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                    .background(Surface2)
+                    .clickable { onRefresh() }
+                    .padding(horizontal = 12.dp, vertical = 7.dp)
             ) {
-                Text(
-                    "$done/4",
-                    color = if (ready) Cyan else Warn,
-                    fontSize = 12.sp
-                )
+                Text("刷新", color = Cyan, fontSize = 12.sp, fontWeight = FontWeight.Medium)
             }
         }
 
-        LazyColumn(
-            modifier = Modifier.weight(1f),
-            contentPadding = PaddingValues(start = 18.dp, end = 18.dp, bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            item {
-                AutoGrantBlock(
-                    accessibility = accessibility,
-                    ready = notifications && overlay,
-                    onClick = onAutoGrant
-                )
-            }
-            item {
-                PermCard(
-                    title = "无障碍服务",
-                    desc = "用于截屏识别与模拟点击，是自动化的核心权限",
-                    ok = accessibility,
-                    onClick = onAccessibility
-                )
-            }
-            item {
-                PermCard(
-                    title = "通知权限",
-                    desc = "扫描与执行进度通过通知回传，缺少时你会看不到结果",
-                    ok = notifications,
-                    onClick = onNotification
-                )
-            }
-            item {
-                PermCard(
-                    title = "悬浮窗",
-                    desc = "在游戏画面上显示控制按钮与执行状态",
-                    ok = overlay,
-                    onClick = onOverlay
-                )
-            }
-            item {
-                PermCard(
-                    title = "打开其他应用",
-                    desc = "点「开始执行」时系统会弹「启动应用」确认框，此时请选「始终允许」。系统不提供该权限的检测接口，设置完成后请手动勾选右侧",
-                    ok = manual,
-                    tag = "建议",
-                    optional = true,
-                    onClick = onManualOpen,
-                    manualToggle = { onManualToggle(!manual) }
-                )
-            }
-
-            // ---------------- 可选增强 ----------------
-            item {
-                Column(Modifier.padding(top = 8.dp, start = 2.dp, end = 2.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "可选增强",
-                            color = TextPrimary,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Spacer(Modifier.weight(1f))
-                        Text("已开 $optDone/4", color = TextTertiary, fontSize = 11.sp)
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "不开启也能正常进入助手，但会影响「到点自动跑」的成功率，建议都设置一遍。",
-                        color = TextTertiary,
-                        fontSize = 11.sp,
-                        lineHeight = 17.sp
+        val listModifier = Modifier
+            .weight(1f)
+            .widthIn(max = ContentMaxWidth)
+            .fillMaxWidth()
+        if (wide) {
+            // 平板：两列网格，8 项一屏放下，不用滚动
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(360.dp),
+                modifier = listModifier,
+                contentPadding = PaddingValues(start = pad, end = pad, bottom = 24.dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                gridItems(entries, key = { it.title }) { e ->
+                    PermCard(
+                        title = e.title,
+                        desc = e.desc,
+                        ok = e.ok,
+                        onClick = e.onClick,
+                        optional = e.optional,
+                        statusText = e.statusText,
+                        actionText = e.actionText,
+                        onAction = e.onAction
                     )
                 }
             }
-            item {
-                PermCard(
-                    title = "定时提醒（精确闹钟）",
-                    desc = "菜到收获或浇水的时间点需要准点提醒你解锁手机，才能接上自动化。不开启时提醒可能被系统延迟或合并",
-                    ok = alarm,
-                    tag = "可选",
-                    optional = true,
-                    onClick = onAlarm
-                )
-            }
-            item {
-                PermCard(
-                    title = "自启动",
-                    desc = if (autoStartKnown) {
-                        "保证到点在后台能被系统拉起。位置：安全中心 → 应用管理 → 权限 → 自启动"
-                    } else {
-                        "保证到点在后台能被系统拉起。小米没有开放检测接口，到「安全中心 → 应用管理 → 权限 → 自启动」开启后，点右侧按钮标记"
-                    },
-                    ok = autoStart,
-                    tag = "可选",
-                    optional = true,
-                    onClick = onAutoStart,
-                    // 系统能探测到就不需要用户手动确认；探测不到交给用户标记
-                    manualToggle = if (autoStartKnown) null else {
-                        { onAutoStartToggle(!autoStart) }
-                    }
-                )
-            }
-            item {
-                PermCard(
-                    title = "锁定后台",
-                    desc = "MIUI 专属。打开最近任务，长按农场助手卡片 → 锁定，再把省电策略设为「无限制」，避免后台被清理",
-                    ok = lock,
-                    tag = "可选",
-                    optional = true,
-                    onClick = onLock,
-                    manualToggle = { onLockToggle(!lock) }
-                )
-            }
-            item {
-                PermCard(
-                    title = "无障碍保活开关",
-                    desc = "在系统快捷开关面板里加一个「农场保活」磁贴，让系统一直持有本应用，无障碍服务不容易被回收（与 GKD 的做法相同）",
-                    ok = tile,
-                    tag = "可选",
-                    optional = true,
-                    onClick = onTile
-                )
+        } else {
+            LazyColumn(
+                modifier = listModifier,
+                contentPadding = PaddingValues(start = pad, end = pad, bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                items(entries, key = { it.title }) { e ->
+                    PermCard(
+                        title = e.title,
+                        desc = e.desc,
+                        ok = e.ok,
+                        onClick = e.onClick,
+                        optional = e.optional,
+                        statusText = e.statusText,
+                        actionText = e.actionText,
+                        onAction = e.onAction
+                    )
+                }
             }
         }
 
@@ -233,26 +237,29 @@ fun PermissionScreen(
                 .background(Surface1)
         ) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 18.dp, vertical = 12.dp)
-                    .height(50.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(if (ready) Cyan else Surface2)
-                    .clickable(enabled = ready) { onEnter() },
-                contentAlignment = Alignment.Center
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "进入账号管理",
-                        color = if (ready) Color(0xFF04262B) else TextTertiary,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                    if (!ready) {
-                        Spacer(Modifier.width(8.dp))
-                        Text("还差 $missing 项", color = TextTertiary, fontSize = 12.sp)
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = Modifier
+                        .widthIn(max = ActionMaxWidth)
+                        .fillMaxWidth()
+                        .padding(horizontal = pad, vertical = 12.dp)
+                        .height(50.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(if (ready) Cyan else Surface2)
+                        .clickable(enabled = ready) { onEnter() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "进入账号管理",
+                            color = if (ready) Color(0xFF04262B) else TextTertiary,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        if (!ready) {
+                            Spacer(Modifier.width(8.dp))
+                            Text("还差 $missing 项", color = TextTertiary, fontSize = 12.sp)
+                        }
                     }
                 }
             }
@@ -260,52 +267,18 @@ fun PermissionScreen(
     }
 }
 
-@Composable
-private fun AutoGrantBlock(
-    accessibility: Boolean,
-    ready: Boolean,
-    onClick: () -> Unit,
-) {
-    val enabled = accessibility && !ready
-    val bg = when {
-        ready -> Cyan.copy(alpha = 0.14f)
-        !accessibility -> Surface2
-        else -> Cyan
-    }
-    val fg = if (enabled) Color(0xFF04262B) else if (ready) Cyan else TextTertiary
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(bg)
-            .then(if (!enabled) Modifier.border(1.dp, Line, RoundedCornerShape(16.dp)) else Modifier)
-            .clickable(enabled = enabled) { onClick() }
-            .padding(horizontal = 16.dp, vertical = 15.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                if (ready) "通知与悬浮窗已就绪" else "一键引导开启",
-                color = if (enabled) fg else if (ready) Cyan else TextSecondary,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Medium
-            )
-            Spacer(Modifier.weight(1f))
-            if (enabled) Text("开始", color = fg, fontSize = 13.sp)
-        }
-        Spacer(Modifier.height(5.dp))
-        Text(
-            when {
-                ready -> "无需再操作，直接进入账号管理"
-                !accessibility -> "需先手动开启无障碍服务"
-                else -> "自动依次打开通知与悬浮窗设置页，你各点一下开关即可，返回后自动推进"
-            },
-            color = if (enabled) Color(0xFF04262B).copy(alpha = 0.72f) else TextTertiary,
-            fontSize = 11.sp,
-            lineHeight = 16.sp
-        )
-    }
-}
+/** 权限卡片的数据描述，手机单列 / 平板网格共用同一份内容 */
+private data class PermEntry(
+    val title: String,
+    val desc: String,
+    val ok: Boolean,
+    val onClick: () -> Unit,
+    val optional: Boolean = false,
+    /** 右侧状态文字覆盖（默认「已开启 / 去开启」），用于「已授权但服务被系统关掉」这类异常态 */
+    val statusText: String? = null,
+    val actionText: String? = null,
+    val onAction: (() -> Unit)? = null,
+)
 
 @Composable
 private fun PermCard(
@@ -313,13 +286,16 @@ private fun PermCard(
     desc: String,
     ok: Boolean,
     onClick: () -> Unit,
-    tag: String? = null,
     /** 可选增强项：未开启时用中性色，不摆出「出错」的红色告警感 */
     optional: Boolean = false,
-    manualToggle: (() -> Unit)? = null,
+    /** 右侧状态文字覆盖，非空时优先显示（异常态用，如「需重启设备」） */
+    statusText: String? = null,
+    /** 右侧按钮文字；null 表示右侧只显示「已开启 / 去开启」的状态文字 */
+    actionText: String? = null,
+    onAction: (() -> Unit)? = null,
 ) {
     val accent = when {
-        ok -> Cyan
+        ok && statusText == null -> Cyan
         optional -> TextTertiary
         else -> Warn
     }
@@ -353,45 +329,34 @@ private fun PermCard(
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(title, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                if (tag != null) {
-                    Spacer(Modifier.width(6.dp))
-                    Box(
-                        Modifier
-                            .clip(RoundedCornerShape(5.dp))
-                            .background(Surface2)
-                            .padding(horizontal = 5.dp, vertical = 1.dp)
-                    ) {
-                        Text(tag, color = TextTertiary, fontSize = 10.sp)
-                    }
-                }
-            }
+            Text(title, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
             Spacer(Modifier.height(4.dp))
             Text(desc, color = TextSecondary, fontSize = 12.sp, lineHeight = 17.sp)
         }
         Spacer(Modifier.width(10.dp))
-        if (manualToggle == null) {
-            Text(
-                if (ok) "已开启" else "去开启",
-                color = if (ok) TextTertiary else Cyan,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium
-            )
-        } else {
+        if (actionText != null && onAction != null) {
             Box(
                 Modifier
                     .clip(RoundedCornerShape(9.dp))
                     .background(if (ok) Cyan.copy(alpha = 0.16f) else Surface2)
-                    .clickable { manualToggle() }
+                    .clickable { onAction() }
                     .padding(horizontal = 10.dp, vertical = 6.dp)
             ) {
-                Text(
-                    if (ok) "已完成" else "已设置",
-                    color = if (ok) Cyan else TextSecondary,
-                    fontSize = 11.sp
-                )
+                Text(actionText, color = if (ok) Cyan else TextSecondary, fontSize = 11.sp)
             }
+        } else {
+            // 右侧只表示状态，不可点；要操作就点整张卡片
+            Text(
+                statusText ?: if (ok) "已开启" else "去开启",
+                color = when {
+                    statusText != null -> Warn
+                    ok -> Cyan
+                    optional -> TextTertiary
+                    else -> Warn
+                },
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium
+            )
         }
     }
 }

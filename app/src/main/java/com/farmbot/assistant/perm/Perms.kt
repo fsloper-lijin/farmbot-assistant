@@ -11,6 +11,9 @@ import android.content.SharedPreferences
 import android.graphics.drawable.Icon
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.annotation.RequiresApi
 import com.farmbot.assistant.R
@@ -18,16 +21,14 @@ import com.farmbot.assistant.bot.KeepAliveTile
 
 /**
  * 权限探测与跳转。
- * 前三项有可靠的系统 API 可查；MIUI 的「后台弹出界面 / 自启动」没有公开 API，
- * 只能跳到它自己的权限页，由用户手动确认后打勾，状态存在 SharedPreferences。
+ * 前三项有可靠的系统 API 可查；MIUI 的「自启动 / 后台弹出界面」是私有 AppOps，
+ * 通过反射调用 framework 的 checkOpNoThrow(int, int, String) 读取真实状态。
  */
 object Perms {
 
     private const val PREFS = "perm"
-    private const val KEY_MANUAL = "manual_bg_ok"
-    private const val KEY_AUTOSTART = "manual_autostart_ok"
-    private const val KEY_LOCK = "manual_lock_ok"
     private const val KEY_TILE = "tile_present"
+    private const val KEY_ACC_BOUND = "acc_bound"
 
     /**
      * 无障碍是否开启。
@@ -48,6 +49,33 @@ object Perms {
         return raw.split(':').any { entry -> expand(entry.trim(), pkg) == serviceClass }
     }
 
+    /** 服务真正连上过（BotService.isReady 为 true）时落一个标记，用于后面区分卡死 */
+    fun markAccessibilityBound(ctx: Context) {
+        val p = prefs(ctx)
+        if (!p.getBoolean(KEY_ACC_BOUND, false)) p.edit().putBoolean(KEY_ACC_BOUND, true).apply()
+    }
+
+    private fun accessibilityEverBound(ctx: Context): Boolean =
+        prefs(ctx).getBoolean(KEY_ACC_BOUND, false)
+
+    /**
+     * HyperOS 的「卡死」状态：设置里仍写着已开启，系统却再也不 bind 服务。
+     * 实测由小爱同学（com.miui.voiceassist）在启动时调用 closeAccessibility 关闭，
+     * 之后重开开关 / 重启应用都无效，只有重启设备能恢复。
+     * 判断依赖「曾经连上过」的标记，避免刚冷启动还没连上时误报。
+     */
+    fun accessibilityStuck(ctx: Context, bound: Boolean): Boolean =
+        !bound && accessibilityEverBound(ctx) && accessibilityEnabled(ctx)
+
+    /**
+     * 无障碍不可用时给用户的一句真实原因。
+     * 卡死状态和「没开授权」的处置办法完全不同：前者只能重启设备。
+     */
+    fun accessibilityReason(ctx: Context): String =
+        if (accessibilityStuck(ctx, bound = false))
+            "无障碍服务被系统关掉了（设置里仍显示已开启），需重启设备后再试"
+        else "无障碍服务未连接"
+
     private fun expand(entry: String, pkg: String): String {
         if (entry.isEmpty()) return ""
         val p = entry.substringBefore('/', "")
@@ -66,26 +94,43 @@ object Perms {
     private fun prefs(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    fun manualConfirmed(ctx: Context): Boolean =
-        prefs(ctx).getBoolean(KEY_MANUAL, false)
-
-    fun setManualConfirmed(ctx: Context, ok: Boolean) {
-        prefs(ctx).edit().putBoolean(KEY_MANUAL, ok).apply()
+    /**
+     * 读取 MIUI 私有 AppOps 的模式。小米把这些权限做成了私有 op 编号（如 10053、10021），
+     * 公开 API 只认字符串 op 名，查不到，所以反射 framework 里的
+     * `checkOpNoThrow(int op, int uid, String packageName)`（@UnsupportedAppUsage 仍在）。
+     * 返回 null = 这台机器上取不到该 op，界面按未开启处理。
+     */
+    private fun miuiOpState(ctx: Context, vararg ops: Int): Boolean? {
+        if (!Build.MANUFACTURER.equals("Xiaomi", ignoreCase = true)) return null
+        val aom = runCatching {
+            ctx.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+        }.getOrNull() ?: return null
+        val method = runCatching {
+            AppOpsManager::class.java.getDeclaredMethod(
+                "checkOpNoThrow",
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                String::class.java
+            ).apply { isAccessible = true }
+        }.getOrNull() ?: return null
+        for (op in ops) {
+            val mode = runCatching {
+                method.invoke(aom, op, ctx.applicationInfo.uid, ctx.packageName) as Int
+            }.getOrNull() ?: continue
+            if (mode == AppOpsManager.MODE_DEFAULT) continue
+            return mode == AppOpsManager.MODE_ALLOWED
+        }
+        return null
     }
 
-    fun autoStartConfirmed(ctx: Context): Boolean =
-        prefs(ctx).getBoolean(KEY_AUTOSTART, false)
+    /**
+     * 自启动。实测 HyperOS：安全中心里的自启动开关与 op 10053 同步（10008 一起变），
+     * 两个都试，取到哪个算哪个。
+     */
+    fun autoStartState(ctx: Context): Boolean? = miuiOpState(ctx, 10053, 10008)
 
-    fun setAutoStartConfirmed(ctx: Context, ok: Boolean) {
-        prefs(ctx).edit().putBoolean(KEY_AUTOSTART, ok).apply()
-    }
-
-    fun lockConfirmed(ctx: Context): Boolean =
-        prefs(ctx).getBoolean(KEY_LOCK, false)
-
-    fun setLockConfirmed(ctx: Context, ok: Boolean) {
-        prefs(ctx).edit().putBoolean(KEY_LOCK, ok).apply()
-    }
+    /** 后台弹出界面（允许从后台把 Activity 顶到前台），实测对应 op 10021 */
+    fun backgroundPopupState(ctx: Context): Boolean? = miuiOpState(ctx, 10021)
 
     // ------------------------------------------------------------------
     // 可选增强权限：不开启也能进入助手，只影响"到点自动跑"的成功率
@@ -117,35 +162,6 @@ object Perms {
         )
     }
 
-    /**
-     * MIUI/HyperOS「自启动」尽力探测：明确允许/禁止返回 true/false，探测不到返回 null。
-     *
-     * 自启动是小米私有能力，没有公开 API；MIUI 内部把它做成了一个私有 AppOps，
-     * op 的名字和编号各版本都不一样，所以这里逐个试常见写法，全都查不到就返回 null，
-     * 交给用户在界面上手动确认（不猜、不假装已授权）。
-     */
-    fun autoStartState(ctx: Context): Boolean? {
-        val pkg = ctx.packageName
-        val uid = ctx.applicationInfo.uid
-        val aom = runCatching {
-            ctx.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
-        }.getOrNull() ?: return null
-        for (op in listOf("auto_start", "AUTO_START", "miui_auto_start")) {
-            val mode = runCatching {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    aom.unsafeCheckOpNoThrow(op, uid, pkg)
-                } else {
-                    aom.checkOpNoThrow(op, uid, pkg)
-                }
-            }.getOrNull() ?: continue
-            when (mode) {
-                AppOpsManager.MODE_ALLOWED -> return true
-                AppOpsManager.MODE_IGNORED, AppOpsManager.MODE_ERRORED -> return false
-            }
-        }
-        return null
-    }
-
     /** 打开 MIUI 自启动管理页；各版本 Activity 名不同，逐个尝试 */
     fun openAutoStart(ctx: Context): Boolean {
         val candidates = mutableListOf(
@@ -171,10 +187,23 @@ object Perms {
         return tryAll(ctx, candidates)
     }
 
-    /** 锁后台没有可跳转的独立页面（要用户在最近任务里长按卡片），这里退一步打开省电策略页 */
+    /**
+     * 省电策略是否「无限制」——对应系统的电池优化白名单，MIUI 的「无限制」就是它。
+     * 最近任务里的长按锁定没有查询接口，这里只反映能查到的部分。
+     */
+    fun batteryUnrestricted(ctx: Context): Boolean = runCatching {
+        (ctx.getSystemService(Context.POWER_SERVICE) as PowerManager)
+            .isIgnoringBatteryOptimizations(ctx.packageName)
+    }.getOrDefault(false)
+
+    /** 弹系统「是否允许后台耗电」对话框；用户选允许后即进入白名单 */
     fun openBatteryPolicy(ctx: Context): Boolean = tryAll(
         ctx,
         listOf(
+            Intent(
+                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:${ctx.packageName}")
+            ),
             Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS),
             Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${ctx.packageName}")),
         )
@@ -232,16 +261,19 @@ object Perms {
                 Icon.createWithResource(ctx, R.drawable.ic_tile),
                 ctx.mainExecutor
             ) { result ->
-                // 0 = 已添加，1 = 本来就在，2 = 用户拒绝（常量是 SystemApi，这里用字面量）
-                if (result == 0 || result == 1) setTilePresent(ctx, true)
-                onResult(
-                    when (result) {
-                        0 -> "磁贴已添加，下拉面板里可以找到「农场保活」"
-                        1 -> "磁贴已经在快捷面板里了"
-                        2 -> "磁贴未添加，可稍后在编辑页里手动添加"
-                        else -> "磁贴添加结果未知（$result）"
-                    }
-                )
+                // 各家 ROM 的 result code 不可信：HyperOS 实测添加成功后也回调 2（AOSP 里 2 = 未添加），
+                // 而且磁贴落库比回调晚，所以等 600ms 后按下拉面板里的真实状态下结论。
+                Handler(Looper.getMainLooper()).postDelayed({
+                    val added = tileAdded(ctx)
+                    if (added) setTilePresent(ctx, true)
+                    onResult(
+                        when {
+                            added -> "磁贴已添加，下拉面板里可以找到「农场保活」"
+                            result == 0 || result == 1 -> "系统已受理，稍后可在下拉面板里确认「农场保活」"
+                            else -> "磁贴未添加，可在下拉面板的编辑页里手动添加"
+                        }
+                    )
+                }, 600)
             }
         }.isSuccess
         if (!ok) onResult("当前系统不支持自动添加磁贴，请手动添加")

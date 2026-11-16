@@ -10,6 +10,7 @@ import android.os.Handler
 import android.os.Looper
 import com.farmbot.assistant.MainActivity
 import com.farmbot.assistant.bot.BotService
+import com.farmbot.assistant.bot.FlowControl
 import com.farmbot.assistant.bot.GameLauncher
 import com.farmbot.assistant.core.IO
 import com.farmbot.assistant.data.Farm
@@ -32,11 +33,19 @@ object Scanner {
     private const val TAG = "Scan"
 
     private val main = Handler(Looper.getMainLooper())
+    /** 本次扫描的取消令牌 */
+    private var token = 0
 
     private fun file(ctx: Context): File = File(ctx.filesDir, "last_scan.json")
 
     fun scan(ctx: Context, accountId: String?, onDone: (List<Farm>) -> Unit) {
+        if (FlowControl.running.value) {
+            IO.log(ctx, TAG, "有自动化正在执行，本次扫描跳过")
+            onDone(emptyList())
+            return
+        }
         val app = ctx.applicationContext
+        token = FlowControl.begin("扫描区服")
         GameLauncher.launch(ctx)
         awaitGameAndCapture(app, 0, accountId, onDone)
     }
@@ -48,8 +57,13 @@ object Scanner {
         accountId: String?,
         onDone: (List<Farm>) -> Unit,
     ) {
+        if (!FlowControl.alive(token)) {
+            FlowControl.end(token)
+            return
+        }
         if (attempt > 24) {
             IO.log(ctx, TAG, "等待游戏前台超时，放弃")
+            FlowControl.end(token)
             onDone(emptyList())
             return
         }
@@ -69,9 +83,14 @@ object Scanner {
         accountId: String?,
         onDone: (List<Farm>) -> Unit,
     ) {
+        if (!FlowControl.alive(token)) {
+            FlowControl.end(token)
+            return
+        }
         BotService.capture { bmp ->
             if (bmp == null) {
                 IO.log(ctx, TAG, "截屏失败")
+                FlowControl.end(token)
                 onDone(emptyList())
                 return@capture
             }
@@ -84,6 +103,7 @@ object Scanner {
                 recoverAll(ctx, bmp, orphans, farms) { all ->
                     save(ctx, accountId, all)
                     notify(ctx, all.size)
+                    FlowControl.end(token)
                     onDone(all)
                 }
             }

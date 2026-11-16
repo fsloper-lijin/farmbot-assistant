@@ -29,11 +29,38 @@ class BotService : AccessibilityService() {
 
         val isReady: Boolean get() = inst != null
 
-        /** 单次截屏，回调在主线程 */
-        fun capture(cb: (Bitmap?) -> Unit) {
+        /**
+         * HyperOS 对无障碍截屏做了间隔限制（实测 1.2s 间隔必定返回 errorCode=1
+         * 「INTERVAL_TIME_SHORT」，且每次失败也会刷新系统侧时间戳，于是会出现
+         * 失败→1.2s 后重试→再失败的死循环）。这里统一限流：两次请求至少间隔 1.6s，
+         * 撞上限流（errorCode=1）时再退避重试两次。
+         */
+        private const val MIN_SHOT_GAP = 1600L
+        private const val SHOT_RETRY_GAP = 1200L
+        private const val SHOT_RETRIES = 2
+        private var lastShotAt = 0L
+
+        /** 单次截屏，回调在主线程（内部限流 + 失败退避重试） */
+        fun capture(cb: (Bitmap?) -> Unit) = shoot(cb, 0)
+
+        private fun shoot(cb: (Bitmap?) -> Unit, retries: Int) {
+            val wait = (lastShotAt + MIN_SHOT_GAP - android.os.SystemClock.uptimeMillis())
+                .coerceAtLeast(0L)
+            main.postDelayed({ shootNow(cb, retries) }, wait)
+        }
+
+        private fun shootNow(cb: (Bitmap?) -> Unit, retries: Int) {
             val s = inst
             if (s == null) { main.post { cb(null) }; return }
-            s.doCapture { bmp -> main.post { cb(bmp) } }
+            lastShotAt = android.os.SystemClock.uptimeMillis()
+            s.doCapture { bmp ->
+                when {
+                    bmp != null -> main.post { cb(bmp) }
+                    retries < SHOT_RETRIES ->
+                        main.postDelayed({ shoot(cb, retries + 1) }, SHOT_RETRY_GAP)
+                    else -> main.post { cb(null) }
+                }
+            }
         }
 
         fun tap(x: Int, y: Int, durationMs: Long = 60L, cb: ((Boolean) -> Unit)? = null) {
@@ -61,11 +88,22 @@ class BotService : AccessibilityService() {
         fun rootNode(): android.view.accessibility.AccessibilityNodeInfo? = runCatching {
             inst?.rootInActiveWindow
         }.getOrNull()
+
+        /** 所有无障碍窗口的根节点（QQ/微信 授权小窗浮在游戏上，不在 rootInActiveWindow 内）。
+         *  排除助手自己的悬浮窗，否则进度提示「正在登录「小号」…」会被当成真实按钮/身份行。 */
+        fun windowRoots(): List<android.view.accessibility.AccessibilityNodeInfo> = runCatching {
+            inst?.windows?.mapNotNull { it.root }
+                ?.filter { it.packageName?.toString() != "com.farmbot.assistant" }
+                ?: emptyList()
+        }.getOrDefault(emptyList())
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         inst = this
+        // FLAG_RETRIEVE_INTERACTIVE_WINDOWS 已在 accessibility_service_config.xml 里声明；
+        // 这里不要再重写 serviceInfo —— 那会把系统下发的配置整个替换掉，
+        // 是应用侧唯一会碰服务配置的地方，没必要冒这个险。
         android.util.Log.i("FarmBot", "accessibility service connected")
     }
 

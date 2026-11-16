@@ -10,9 +10,13 @@ import sys
 
 NODE = re.compile(r'text="([^"]*)"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
 
+# 可选第二参数指定设备序列号：python tools/ui.py list <serial>
+SERIAL = sys.argv[2] if len(sys.argv) > 2 else None
+
 
 def adb(*args):
-    return subprocess.run(["adb", *args], capture_output=True, text=True).stdout
+    prefix = ("-s", SERIAL) if SERIAL else ()
+    return subprocess.run(["adb", *prefix, *args], capture_output=True, text=True).stdout
 
 
 def dump():
