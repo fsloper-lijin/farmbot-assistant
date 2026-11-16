@@ -128,9 +128,7 @@ object LoginFlow {
         next: Int,
         done: (String) -> Unit,
     ) {
-        fun hit(kw: String) = lines.firstOrNull {
-            it.text.replace(Regex("\\s+"), "").contains(kw)
-        }
+        fun hit(item: Ui.Item) = Ui.line(lines, item)
 
         if (!FlowControl.alive(runToken)) {
             finish(ctx, "已强制停止", done)
@@ -138,22 +136,20 @@ object LoginFlow {
         }
 
         // 首次启动/协议更新会挡一个「同意」弹窗
-        val agree = hit("同意")
-        val hasAgreement = lines.any {
-            it.text.contains("协议") || it.text.contains("许可") || it.text.contains("隐私")
-        }
+        val agree = hit(Ui.AGREE_ANY)
+        val hasAgreement = Ui.has(lines, Ui.AGREEMENT_TEXT)
         if (agree != null && hasAgreement) {
             tapLine(ctx, agree, "同意协议")
             poll(ctx, acc, next, done)
             return
         }
 
-        val qqLogin = hit("QQ好友玩")
-        val wxLogin = hit("微信好友玩")
-        val qrQQ = hit("QQ扫码授权")
-        val qrWX = hit("微信扫码授权")
-        val qrPage = hit("扫码授权登录") ?: hit("使用QQ手机版扫码") ?: hit("使用微信扫码")
-        val lobby = hit("开始游戏") ?: hit("换区")
+        val qqLogin = hit(Ui.QQ_LOGIN)
+        val wxLogin = hit(Ui.WX_LOGIN)
+        val qrQQ = hit(Ui.QR_AUTH_QQ)
+        val qrWX = hit(Ui.QR_AUTH_WX)
+        val qrPage = hit(Ui.QR_PAGE_TITLE) ?: hit(Ui.QR_MENU_QQ) ?: hit(Ui.QR_MENU_WX)
+        val lobby = hit(Ui.GAME_START) ?: hit(Ui.CHANGE_AREA)
 
         // 已经登录进大厅了，不用再点登录
         if (lobby != null && qqLogin == null && wxLogin == null && qrPage == null) {
@@ -399,12 +395,7 @@ object LoginFlow {
         status: (String) -> Unit,
         done: (Account, String) -> Unit,
     ) {
-        fun hit(kw: String) = lines.firstOrNull {
-            it.text.replace(Regex("\\s+"), "").contains(kw)
-        }
-        fun short(t: String) = lines.firstOrNull {
-            it.text.replace(Regex("\\s+"), "") == t
-        }
+        fun hit(item: Ui.Item) = Ui.line(lines, item)
         fun retry(a: Account = acc) = pollAuto(ctx, a, next, status, done)
 
         if (!FlowControl.alive(autoToken)) {
@@ -420,7 +411,7 @@ object LoginFlow {
         }
 
         // 1) 系统「想要打开 QQ / 是否允许」→ 允许
-        if (hit("想要打开") != null || hit("启动应用") != null || hit("是否允许") != null) {
+        if (Ui.has(lines, Ui.OPEN_APP)) {
             val allowLine = lines.asSequence()
                 .filter {
                     val t = it.text.replace(Regex("\\s+"), "")
@@ -441,7 +432,7 @@ object LoginFlow {
         // 1.5) 版本更新公告等冷启动弹窗：只有右上角一个 ✕ 图钉按钮（OCR 读不到），
         //      实测（平板 2880x1800）✕ 位于屏幕比例 (0.854, 0.173)，先按比例点掉
         if (fg == GameLauncher.PACKAGE &&
-            (hit("更新公告") != null || hit("亲爱的召唤师") != null) && short("同意") == null
+            Ui.has(lines, Ui.UPDATE_POPUP) && hit(Ui.AGREE_BTN) == null
         ) {
             if (System.currentTimeMillis() - autoTappedAt > 3000) {
                 autoTappedAt = System.currentTimeMillis()
@@ -454,9 +445,9 @@ object LoginFlow {
         }
 
         // 2) 游戏协议弹窗（只在游戏界面，避免误点 QQ/微信 授权页的「同意」）
-        val agreeShort = short("同意") ?: short("我同意")
+        val agreeShort = hit(Ui.AGREE_BTN)
         if (fg == GameLauncher.PACKAGE && agreeShort != null &&
-            (hit("拒绝") != null || hit("许可及服务协议") != null || hit("隐私政策") != null)
+            Ui.has(lines, Ui.AGREEMENT_MARKERS)
         ) {
             tapLine(ctx, agreeShort, "同意协议")
             retry()
@@ -465,8 +456,8 @@ object LoginFlow {
 
         // 3) 游戏登录页（必须限定游戏前台：QQ 小窗模式下小窗后面的登录页也会被 OCR 读到，
         //    不加限定会在这里空转、永远轮不到下面的 QQ 弹窗分支）
-        val qqLogin = hit("QQ好友玩")
-        val wxLogin = hit("微信好友玩")
+        val qqLogin = hit(Ui.QQ_LOGIN)
+        val wxLogin = hit(Ui.WX_LOGIN)
         if (fg == GameLauncher.PACKAGE && (qqLogin != null || wxLogin != null)) {
             val useWx = acc.loginType == LoginType.WECHAT
             val btn = if (useWx) wxLogin else qqLogin
@@ -497,9 +488,7 @@ object LoginFlow {
             if (winText.isNotBlank()) {
                 // 0) 授权页一「你可以使用不同的头像/昵称登录」：整页身份列表
                 //    抓全量昵称回写账号 → 点目标身份行 → 对勾核验 → 同意
-                if (winText.contains("使用不同") || winText.contains("和朋友关系") ||
-                    winText.contains("QQ头像昵称")
-                ) {
+                if (Ui.inText(winText, Ui.IDENTITY_PAGE) || Ui.inText(winText, Ui.IDENTITY_SUBTITLE)) {
                     val nodeLines = Nodes.allWindowsLines().map { Ocr.ScanLine(it.first, it.second) }
                     val step = handleIdentityPage(ctx, acc, bmp, w, h, nodeLines, status) { row ->
                         if (Nodes.clickByTextAllWindows(listOf(row.name)) == null) {
@@ -513,7 +502,7 @@ object LoginFlow {
                 }
 
                 // a) 切号列表页「选择要登录的账号」
-                if (winText.contains("选择要登录的账号") || winText.contains("添加账号")) {
+                if (Ui.inText(winText, Ui.PICKER_PAGE)) {
                     val key = acc.qqNick.ifBlank { acc.name }
                     if (cool > 1500) {
                         var hitText: String? = null
@@ -523,7 +512,7 @@ object LoginFlow {
                             // 在切号列表里选第一个没用过的（只认列表标题下方、弹窗宽度内的行）
                             val all = Nodes.allWindowsLines()
                             val title = all.firstOrNull {
-                                it.first.replace(WS, "").contains("选择要登录")
+                                Ui.matches(it.first, Ui.PICKER_TITLE)
                             }?.second
                             val row = all
                                 .filter { (t, r) ->
@@ -570,7 +559,7 @@ object LoginFlow {
 
                 // c) 目标身份不在当前 QQ 账号下 → 切换账号
                 if (!autoPicked && acc.name.isNotBlank() && cool > 1500) {
-                    val hitText = Nodes.clickByTextAllWindows(listOf("切换账号", "切换帐号"))
+                    val hitText = Nodes.clickByTextAllWindows(Ui.SWITCH_ACCOUNT.keys)
                     if (hitText != null) {
                         autoTappedAt = System.currentTimeMillis()
                         IO.log(ctx, TAG, "节点点击 切换账号")
@@ -581,7 +570,7 @@ object LoginFlow {
 
                 // d)+e) 授权页一/二都只有「同意」；2.5s 冷却防页面切换动画期间连点
                 if (cool > 2500) {
-                    val hitText = Nodes.clickByTextAllWindows(listOf("同意"))
+                    val hitText = Nodes.clickByTextAllWindows(Ui.AGREE_ANY.keys)
                     if (hitText != null) {
                         autoTappedAt = System.currentTimeMillis()
                         IO.log(ctx, TAG, "节点点击 同意QQ授权")
@@ -605,7 +594,7 @@ object LoginFlow {
             // 切号列表页：只看标题/「添加账号」按钮。
             // 不能用「行内有没有 9 位以上数字」判断 —— 授权页底部的版权行
             // 「批准文号...ISBN...粤网文20176138」里就有长数字，会误判成列表页
-            val pickerPage = hit("选择要登录的账号") != null || hit("添加账号") != null
+            val pickerPage = Ui.has(lines, Ui.PICKER_PAGE)
 
             if (pickerPage) {
                 // a) 按 QQ 昵称优先、其次游戏昵称匹配账号行
@@ -617,9 +606,7 @@ object LoginFlow {
                     .maxByOrNull { it.box.centerY() }
                 // b) 新账号还不知道 QQ 昵称：跳过已被其他账号占用的号，选列表里第一个没用过的
                 val fallback = if (target == null && key.isBlank() && excludeQq.isNotEmpty()) {
-                    val title = lines.firstOrNull {
-                        it.text.replace(Regex("\\s+"), "").contains("选择要登录")
-                    }
+                    val title = lines.firstOrNull { Ui.matches(it.text, Ui.PICKER_TITLE) }
                     lines.asSequence()
                         .filter { isPickerRow(it.text) && !usedQq(it.text) && inBounds(it) }
                         .filter { l ->
@@ -647,9 +634,9 @@ object LoginFlow {
                 return
             }
 
-            val switchBtn = short("切换账号") ?: short("切换帐号")
-            val reject = short("拒绝")
-            val agree = short("同意") ?: short("我同意")
+            val switchBtn = hit(Ui.SWITCH_ACCOUNT)
+            val reject = hit(Ui.REJECT)
+            val agree = hit(Ui.AGREE_BTN)
 
             // b) 授权页一「你可以使用不同的头像/昵称登录」：整页身份列表
             //    （抓全量昵称、点目标行、核验对勾），识别不到列表再走下面的老逻辑
@@ -731,7 +718,7 @@ object LoginFlow {
 
         // 5) 微信授权页：确认/允许
         if (fg == WX_PKG) {
-            val allow = short("允许") ?: short("确认登录") ?: short("登录")
+            val allow = hit(Ui.WX_ALLOW)
             if (allow != null && System.currentTimeMillis() - autoTappedAt > 2000) {
                 autoTappedAt = System.currentTimeMillis()
                 tapLine(ctx, allow, "微信授权")
@@ -742,7 +729,7 @@ object LoginFlow {
         }
 
         // 6) 已回到游戏大厅：读昵称 → 必要时退出切换账号 → 同步区服 → 回写账号
-        val lobby = hit("开始游戏") ?: hit("换区")
+        val lobby = hit(Ui.GAME_START) ?: hit(Ui.CHANGE_AREA)
         if (fg == GameLauncher.PACKAGE && lobby != null) {
             handleLobby(ctx, acc, bmp, w, h, lines, status, done)
             return
@@ -775,10 +762,8 @@ object LoginFlow {
         cb: (Pair<Int, Int>?) -> Unit,
     ) {
         fun plain(l: Ocr.ScanLine) = l.text.replace(Regex("\\s+"), "")
-        val hint = lines.firstOrNull { plain(it).contains("使用不同") }
-            ?: lines.firstOrNull { plain(it).contains("不同的头像") }
-            ?: lines.firstOrNull { plain(it) == "创建" }
-        val agree = lines.firstOrNull { plain(it) == "同意" }
+        val hint = Ui.line(lines, Ui.IDENTITY_PAGE) ?: Ui.line(lines, Ui.CREATE_IDENTITY)
+        val agree = Ui.line(lines, Ui.AGREE_BTN)
         if (hint == null || agree == null || agree.box.top <= hint.box.bottom) {
             cb(null); return
         }
@@ -869,11 +854,11 @@ object LoginFlow {
             l.box.left >= 0 && l.box.top >= 0 && l.box.right <= w && l.box.bottom <= h
         val page = lines.filter { inBounds(it) }
         // 「选择要登录的账号」是切 QQ 号那一页，里面的行是 QQ 账号不是游戏身份
-        if (page.any { plainText(it.text).contains("选择要登录") }) return emptyList()
+        if (page.any { Ui.matches(it.text, Ui.PICKER_TITLE) }) return emptyList()
         // 列表上下边界只能靠提示行和「同意」定；提示行没读到时宁可这一帧不解析，
         // 否则会把状态栏（时间/日期/电量）当成身份昵称写进账号
-        val hint = page.firstOrNull { plainText(it.text).contains("使用不同") } ?: return emptyList()
-        val agree = page.filter { plainText(it.text) == "同意" }.maxByOrNull { it.box.top }
+        val hint = Ui.line(page, Ui.IDENTITY_PAGE) ?: return emptyList()
+        val agree = page.filter { Ui.matches(it.text, Ui.AGREE_BTN) }.maxByOrNull { it.box.top }
         val top = hint.box.bottom + 1
         val bottom = agree?.box?.top ?: h
         if (bottom - top < 20) return emptyList()
@@ -977,11 +962,9 @@ object LoginFlow {
         clickRow: (IdentityRow) -> Unit,
     ): IdentityStep {
         // 切 QQ 号那一页（「选择要登录的账号」）交给老逻辑按 QQ 昵称点，不能当身份列表解析
-        if (lines.any { plainText(it.text).contains("选择要登录") }) return IdentityStep(false, acc)
-        val page = lines.any {
-            val t = plainText(it.text)
-            t.contains("使用不同") || t.contains("和朋友关系")
-        } || lines.any { SUBTITLE_RE.containsMatchIn(plainText(it.text)) }
+        if (lines.any { Ui.matches(it.text, Ui.PICKER_TITLE) }) return IdentityStep(false, acc)
+        val page = lines.any { Ui.matches(it.text, Ui.IDENTITY_PAGE) } ||
+            lines.any { SUBTITLE_RE.containsMatchIn(plainText(it.text)) }
         if (!page) return IdentityStep(false, acc)
 
         val rows = parseIdentityRows(lines, w, h)
@@ -991,11 +974,9 @@ object LoginFlow {
             return IdentityStep(true, acc)
         }
 
-        val agree = lines.firstOrNull { plainText(it.text) == "同意" }
-            ?: lines.firstOrNull { plainText(it.text) == "我同意" }
-        val switch = lines.firstOrNull { plainText(it.text) == "切换账号" }
-            ?: lines.firstOrNull { plainText(it.text) == "切换帐号" }
-        val hint = lines.firstOrNull { plainText(it.text).contains("使用不同") }
+        val agree = Ui.line(lines, Ui.AGREE_BTN)
+        val switch = Ui.line(lines, Ui.SWITCH_ACCOUNT)
+        val hint = Ui.line(lines, Ui.IDENTITY_PAGE)
         val listTop = (hint?.box?.bottom ?: (h * 0.18f).toInt()).coerceIn(0, h - 1)
         val listBottom = (agree?.box?.top ?: (h * 0.78f).toInt()).coerceIn(listTop + 1, h)
         val panelRight = agree?.box?.right ?: (w * 0.92f).toInt()
@@ -1198,7 +1179,7 @@ object LoginFlow {
                 identityZoomFails = 0
                 identityRetaps = 0
                 resetIdentityScan()
-                val exit = lines.firstOrNull { plain(it) == "退出" }
+                val exit = Ui.line(lines, Ui.EXIT)
                 if (exit != null) tapLine(ctx, exit, "退出「$name」")
                 else {
                     IO.log(ctx, TAG, "退出按钮 OCR 未命中，按比例点击 ($EXIT_RX,$EXIT_RY)")
@@ -1244,7 +1225,7 @@ object LoginFlow {
                 loginType = if (matched || acc.loginType == LoginType.WECHAT) detected else acc.loginType,
             )
 
-            val change = lines.firstOrNull { plain(it).contains("换区") }
+            val change = Ui.line(lines, Ui.CHANGE_AREA)
             if (change != null) {
                 tapLine(ctx, change, "换区")
                 status("登录成功：$finalName，正在同步区服…")
@@ -1300,7 +1281,7 @@ object LoginFlow {
                         } else {
                             if (attempt == 3) {
                                 // 面板可能没弹出来，再点一次「换区」
-                                lines.firstOrNull { it.text.replace(Regex("\\s+"), "").contains("换区") }?.let {
+                                Ui.line(lines, Ui.CHANGE_AREA)?.let {
                                     tapLine(ctx, it, "换区(重试)")
                                 }
                             }

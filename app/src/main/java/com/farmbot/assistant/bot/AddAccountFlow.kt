@@ -140,9 +140,7 @@ object AddAccountFlow {
             abort(fail, "已强制停止")
             return
         }
-        fun hit(kw: String) = lines.firstOrNull {
-            it.text.replace(Regex("\\s+"), "").contains(kw)
-        }
+        fun hit(item: Ui.Item) = Ui.line(lines, item)
         fun retry() = poll(ctx, next, status, done, fail)
 
         if (next % 6 == 1) {
@@ -155,11 +153,10 @@ object AddAccountFlow {
         //    共同特征：底部同时有「拒绝」「同意」两个短按钮 → 直接点「同意」。
         //    注意：正文里也有「…当您点击同意并开始使用…」，不能用 contains 命中长句，
         //    只认文字完全等于「同意」的短行。
-        val agreeShort = shortLine(lines, "同意") ?: shortLine(lines, "我同意")
-        val looksAgreement = hit("拒绝") != null ||
-            hit("许可及服务协议") != null || hit("隐私政策") != null || hit("隐私保护指引") != null
+        val agreeShort = hit(Ui.AGREE_BTN)
+        val looksAgreement = Ui.has(lines, Ui.AGREEMENT_MARKERS)
         val isAgreement = agreeShort != null && looksAgreement &&
-            hit("想要打开") == null && hit("启动应用") == null
+            !Ui.has(lines, Ui.OPEN_APP)
         if (isAgreement) {
             val now = System.currentTimeMillis()
             if (now - lastAgreeAt > 4000) {
@@ -194,8 +191,8 @@ object AddAccountFlow {
         }
 
         // 1.5) 游戏自己的「权限列表」弹窗（定位/存储/日历/麦克风/相机）→ 点「确定」
-        if (hit("权限列表") != null || hit("为保证正常体验") != null) {
-            val ok = shortLine(lines, "确定")
+        if (Ui.has(lines, Ui.PERMISSION_DIALOG)) {
+            val ok = hit(Ui.CONFIRM)
             if (ok != null && inBounds(ok, w, h) && System.currentTimeMillis() - lastConfirmAt > 2500) {
                 lastConfirmAt = System.currentTimeMillis()
                 tapLine(ctx, ok, "确定游戏权限列表")
@@ -208,7 +205,7 @@ object AddAccountFlow {
         // 1.6) 系统弹窗：
         //      「王者荣耀 想要打开 QQ，是否允许？」→ 本次允许 / 始终允许
         //      「是否允许访问…」→ 仅在使用中允许 / 始终允许
-        val systemDialog = hit("想要打开") != null || hit("启动应用") != null || hit("是否允许") != null
+        val systemDialog = Ui.has(lines, Ui.OPEN_APP)
         if (systemDialog) {
             val allow = lines.asSequence()
                 .filter {
@@ -230,13 +227,13 @@ object AddAccountFlow {
         }
 
         // 2) 扫码页（另一种设备扫）
-        if (hit("使用QQ手机版扫码") != null) {
+        if (hit(Ui.QR_MENU_QQ) != null) {
             qrSeen = LoginType.QQ_QR
             status("请用另一台手机的 QQ 扫码授权")
             retry()
             return
         }
-        if (hit("使用微信扫码") != null || hit("使用微信手机版扫码") != null) {
+        if (hit(Ui.QR_MENU_WX) != null) {
             qrSeen = LoginType.WECHAT_QR
             status("请用另一台手机的微信扫码授权")
             retry()
@@ -244,8 +241,8 @@ object AddAccountFlow {
         }
 
         // 3) 登录选择页
-        val loginQQ = hit("QQ好友玩")
-        val loginWX = hit("微信好友玩")
+        val loginQQ = hit(Ui.QQ_LOGIN)
+        val loginWX = hit(Ui.WX_LOGIN)
         if (loginQQ != null || loginWX != null) {
             status("请选择 QQ / 微信登录（右上角可扫码）")
             retry()
@@ -253,13 +250,13 @@ object AddAccountFlow {
         }
 
         // 4) 已登录大厅：右上角昵称 + 当前区服
-        val lobby = hit("开始游戏") ?: hit("换区")
+        val lobby = hit(Ui.GAME_START) ?: hit(Ui.CHANGE_AREA)
         val serverLine = lines.firstOrNull { Regex(SERVER_RE).containsMatchIn(it.text) }
         if (lobby != null && serverLine != null) {
             val type = qrSeen ?: if (serverLine.text.contains("微信")) LoginType.WECHAT else LoginType.QQ
             readNickname(ctx, bmp, lines, w, h) { name ->
                 IO.log(ctx, TAG, "已登录 昵称=$name 区服=${serverLine.text} 类型=${type.name}")
-                val change = hit("换区")
+                val change = hit(Ui.CHANGE_AREA)
                 if (change != null) {
                     tapLine(ctx, change, "换区")
                     status("登录成功：$name，正在同步区服…")
@@ -320,7 +317,7 @@ object AddAccountFlow {
                             succeed(done, Account(name = name, loginType = type, farms = merged))
                             status("完成：$name · ${merged.size} 个区服")
                         } else {
-                            lines.firstOrNull { it.text.contains("换区") }?.let {
+                            Ui.line(lines, Ui.CHANGE_AREA)?.let {
                                 if (attempt == 3) tapLine(ctx, it, "换区")
                             }
                             pollServers(ctx, name, type, attempt + 1, merged, status, done, fail)
@@ -345,22 +342,14 @@ object AddAccountFlow {
         cb: (String) -> Unit,
     ) {
         val fallback = pickNickname(lines, w, h, region = true)
-        val left = (w * 0.70f).toInt()
-        val bottom = (h * 0.16f).toInt()
-        if (w - left < 40 || bottom < 20) {
+        val region = Ui.NICKNAME_REGION.rectOf(w, h)
+        if (region.width() < 40 || region.height() < 20) {
             cb(fallback)
             return
         }
-        val crop = runCatching {
-            android.graphics.Bitmap.createBitmap(bmp, left, 0, w - left, bottom)
-        }.getOrNull()
-        if (crop == null) {
-            cb(fallback)
-            return
-        }
-        Ocr.recognize(crop, 5f) { cropLines ->
-            crop.recycle()
-            val direct = pickNickname(cropLines, crop.width, crop.height, region = false)
+        // 只识别右上角这一块（5 倍放大）：整屏 OCR 常把状态栏、「12+」一起读进来
+        Ocr.recognize(bmp, 5f, region = Ui.NICKNAME_REGION) { cropLines ->
+            val direct = pickNickname(cropLines, w, h, region = false)
             val name = direct.ifEmpty { fallback }
             IO.log(ctx, TAG, "昵称候选=${cropLines.map { it.text }} -> $name")
             cb(name)
@@ -439,10 +428,6 @@ object AddAccountFlow {
             }
         }
     }
-
-    /** 精确匹配按钮文字（去空格后完全相等），避免命中正文里的同名词语 */
-    private fun shortLine(lines: List<Ocr.ScanLine>, text: String): Ocr.ScanLine? =
-        lines.firstOrNull { it.text.replace(Regex("\\s+"), "") == text }
 
     private fun inBounds(line: Ocr.ScanLine, w: Int, h: Int): Boolean =
         line.box.left >= 0 && line.box.top >= 0 && line.box.right <= w && line.box.bottom <= h

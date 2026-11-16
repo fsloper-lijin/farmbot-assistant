@@ -18,6 +18,19 @@ import com.farmbot.assistant.data.Farm
  * 再找其正下方、水平方向有重叠、且含 "Lv." 的最近一行作为角色信息。
  * 这样能自动排除右上角「上次登录」提示、左侧页签等干扰文本。
  */
+/**
+ * 屏幕区域，单位是比例（0~1），不写死像素 —— 手机 2400×1080 与平板 2880×1800 通用。
+ * 只给「识别范围」用；点击坐标仍然取自 OCR 文字框中心。
+ */
+data class Region(val l: Float, val t: Float, val r: Float, val b: Float) {
+    fun rectOf(w: Int, h: Int): Rect = Rect(
+        (w * l).toInt().coerceIn(0, w),
+        (h * t).toInt().coerceIn(0, h),
+        (w * r).toInt().coerceIn(0, w),
+        (h * b).toInt().coerceIn(0, h),
+    )
+}
+
 object Ocr {
 
     private val client by lazy {
@@ -37,15 +50,36 @@ object Ocr {
     private val LEVEL = Regex("Lv\\.?\\s*(\\d+)")
     private val ROLE = Regex("Lv\\.?\\s*\\d+\\s*(.*)")
 
-    fun recognize(bmp: Bitmap, scale: Float = 1f, cb: (List<ScanLine>) -> Unit) {
-        val src = if (scale != 1f) {
-            Bitmap.createScaledBitmap(
-                bmp,
-                (bmp.width * scale).toInt(),
-                (bmp.height * scale).toInt(),
-                true
-            )
-        } else bmp
+    /**
+     * 识别整屏（region=null）或只识别 [region] 划出的那一块。
+     * 裁剪时返回的文字框已经加回区域偏移，坐标始终是**整屏**坐标，
+     * 调用方可以直接拿去点，不需要自己做换算。
+     */
+    fun recognize(
+        bmp: Bitmap,
+        scale: Float = 1f,
+        region: Region? = null,
+        cb: (List<ScanLine>) -> Unit,
+    ) {
+        val r = region?.rectOf(bmp.width, bmp.height)
+        val crop = if (r != null && r.width() > 16 && r.height() > 16) {
+            runCatching { Bitmap.createBitmap(bmp, r.left, r.top, r.width(), r.height()) }.getOrNull()
+        } else null
+        val base = crop ?: bmp
+        val offX = if (crop != null) r!!.left else 0
+        val offY = if (crop != null) r!!.top else 0
+        val src = if (scale != 1f) Bitmap.createScaledBitmap(
+            base,
+            (base.width * scale).toInt(),
+            (base.height * scale).toInt(),
+            true
+        ) else base
+
+        fun release() {
+            if (src !== base && src !== bmp) src.recycle()
+            if (base !== bmp) base.recycle()
+        }
+
         val image = InputImage.fromBitmap(src, 0)
         client.process(image)
             .addOnSuccessListener { result ->
@@ -53,17 +87,27 @@ object Ocr {
                 for (block in result.textBlocks) {
                     for (line in block.lines) {
                         val box = line.boundingBox ?: continue
-                        lines.add(ScanLine(line.text, box))
+                        lines.add(ScanLine(line.text, mapBack(box, offX, offY, scale)))
                     }
                 }
-                if (src !== bmp) src.recycle()
+                release()
                 cb(lines)
             }
             .addOnFailureListener {
-                if (src !== bmp) src.recycle()
+                release()
                 cb(emptyList())
             }
     }
+
+    /** 裁剪/缩放后的文字框 → 整屏坐标 */
+    private fun mapBack(b: Rect, offX: Int, offY: Int, scale: Float): Rect =
+        if (offX == 0 && offY == 0 && scale == 1f) b
+        else Rect(
+            offX + (b.left / scale).toInt(),
+            offY + (b.top / scale).toInt(),
+            offX + (b.right / scale).toInt(),
+            offY + (b.bottom / scale).toInt(),
+        )
 
     fun toFarms(lines: List<ScanLine>): List<Farm> {
         val servers = lines.filter { SERVER.containsMatchIn(it.text.trim()) }
