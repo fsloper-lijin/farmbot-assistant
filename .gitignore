@@ -1,0 +1,37 @@
+# ---- Android / Gradle ----
+.gradle/
+.kotlin/
+build/
+app/build/
+local.properties
+captures/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# ---- IDE ----
+.idea/
+*.iml
+.vscode/
+
+# ---- 签名与密钥（绝对不要提交）----
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+*.pem
+*.p12
+
+# ---- 本机私有资料 ----
+# 交接笔记里含个人设备信息，不进公开仓库
+HANDOFF.md
+# 调试过程中产生的截图/控件树 dump
+_shots/
+_seed/
+*.log
+
+# ---- 系统垃圾 ----
+.DS_Store
+Thumbs.db

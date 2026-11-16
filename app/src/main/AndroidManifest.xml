@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@android:drawable/ic_menu_manage"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.FarmBot">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:screenOrientation="portrait"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <receiver
+            android:name=".CmdReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.farmbot.assistant.CMD_CAPTURE" />
+                <action android:name="com.farmbot.assistant.CMD_GRID" />
+                <action android:name="com.farmbot.assistant.CMD_TAP" />
+                <action android:name="com.farmbot.assistant.CMD_SWIPE" />
+                <action android:name="com.farmbot.assistant.CMD_BACK" />
+                <action android:name="com.farmbot.assistant.CMD_PING" />
+                <action android:name="com.farmbot.assistant.CMD_SCAN" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name=".bot.BotService"
+            android:exported="true"
+            android:label="@string/service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+    </application>
+
+</manifest>
