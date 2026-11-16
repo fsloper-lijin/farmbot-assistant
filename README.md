@@ -58,8 +58,8 @@
 ## 五、构建
 
 ```bash
-git clone <this-repo>
-cd wangzhe-farm-bot
+git clone https://github.com/fsloper-lijin/farmbot-assistant.git
+cd farmbot-assistant
 
 # 方式一：使用自带 wrapper
 ./gradlew assembleDebug
