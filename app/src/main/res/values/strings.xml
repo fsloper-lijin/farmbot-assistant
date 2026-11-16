@@ -3,4 +3,5 @@
     <string name="app_name">农场助手</string>
     <string name="service_label">农场助手 · 自动化服务</string>
     <string name="service_desc">用于识别王者农场界面并模拟点击手势，仅在用户主动开启时运行。</string>
+    <string name="tile_label">农场保活</string>
 </resources>

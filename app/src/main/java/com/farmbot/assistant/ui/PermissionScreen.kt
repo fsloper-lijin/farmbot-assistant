@@ -43,18 +43,34 @@ fun PermissionScreen(
     notifications: Boolean,
     overlay: Boolean,
     manual: Boolean,
+    alarm: Boolean,
+    autoStart: Boolean,
+    autoStartKnown: Boolean,
+    lock: Boolean,
+    tile: Boolean,
     onAutoGrant: () -> Unit,
     onAccessibility: () -> Unit,
     onNotification: () -> Unit,
     onOverlay: () -> Unit,
     onManualOpen: () -> Unit,
     onManualToggle: (Boolean) -> Unit,
+    onAlarm: () -> Unit,
+    onAutoStart: () -> Unit,
+    onAutoStartToggle: (Boolean) -> Unit,
+    onLock: () -> Unit,
+    onLockToggle: (Boolean) -> Unit,
+    onTile: () -> Unit,
     onEnter: () -> Unit,
 ) {
+    // 必开项（参与放行判断）：无障碍 / 通知 / 悬浮窗
     val required = listOf(accessibility, notifications, overlay)
     val done = required.count { it } + if (manual) 1 else 0
     val missing = required.count { !it }
     val ready = missing == 0
+
+    // 可选增强项（不参与放行判断）
+    val optional = listOf(alarm, autoStart, lock, tile)
+    val optDone = optional.count { it }
 
     Column(
         modifier = Modifier
@@ -71,7 +87,7 @@ fun PermissionScreen(
                 Text("权限准备", color = TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.Medium)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "全部开启后才能进入账号管理",
+                    "前三项全开才能进入；下方增强项可跳过",
                     color = TextSecondary,
                     fontSize = 12.sp
                 )
@@ -107,7 +123,6 @@ fun PermissionScreen(
                     title = "无障碍服务",
                     desc = "用于截屏识别与模拟点击，是自动化的核心权限",
                     ok = accessibility,
-                    required = true,
                     onClick = onAccessibility
                 )
             }
@@ -116,7 +131,6 @@ fun PermissionScreen(
                     title = "通知权限",
                     desc = "扫描与执行进度通过通知回传，缺少时你会看不到结果",
                     ok = notifications,
-                    required = true,
                     onClick = onNotification
                 )
             }
@@ -125,7 +139,6 @@ fun PermissionScreen(
                     title = "悬浮窗",
                     desc = "在游戏画面上显示控制按钮与执行状态",
                     ok = overlay,
-                    required = true,
                     onClick = onOverlay
                 )
             }
@@ -134,19 +147,82 @@ fun PermissionScreen(
                     title = "打开其他应用",
                     desc = "点「开始执行」时系统会弹「启动应用」确认框，此时请选「始终允许」。系统不提供该权限的检测接口，设置完成后请手动勾选右侧",
                     ok = manual,
-                    required = false,
+                    tag = "建议",
+                    optional = true,
                     onClick = onManualOpen,
                     manualToggle = { onManualToggle(!manual) }
                 )
             }
+
+            // ---------------- 可选增强 ----------------
             item {
-                Text(
-                    "提示：部分系统会把「自启动」与「后台弹出界面」放在同一页，建议一并开启，" +
-                        "否则切到游戏后助手可能被系统回收。",
-                    color = TextTertiary,
-                    fontSize = 11.sp,
-                    lineHeight = 17.sp,
-                    modifier = Modifier.padding(top = 4.dp, start = 2.dp, end = 2.dp)
+                Column(Modifier.padding(top = 8.dp, start = 2.dp, end = 2.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "可选增强",
+                            color = TextPrimary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Spacer(Modifier.weight(1f))
+                        Text("已开 $optDone/4", color = TextTertiary, fontSize = 11.sp)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "不开启也能正常进入助手，但会影响「到点自动跑」的成功率，建议都设置一遍。",
+                        color = TextTertiary,
+                        fontSize = 11.sp,
+                        lineHeight = 17.sp
+                    )
+                }
+            }
+            item {
+                PermCard(
+                    title = "定时提醒（精确闹钟）",
+                    desc = "菜到收获或浇水的时间点需要准点提醒你解锁手机，才能接上自动化。不开启时提醒可能被系统延迟或合并",
+                    ok = alarm,
+                    tag = "可选",
+                    optional = true,
+                    onClick = onAlarm
+                )
+            }
+            item {
+                PermCard(
+                    title = "自启动",
+                    desc = if (autoStartKnown) {
+                        "保证到点在后台能被系统拉起。位置：安全中心 → 应用管理 → 权限 → 自启动"
+                    } else {
+                        "保证到点在后台能被系统拉起。小米没有开放检测接口，到「安全中心 → 应用管理 → 权限 → 自启动」开启后，点右侧按钮标记"
+                    },
+                    ok = autoStart,
+                    tag = "可选",
+                    optional = true,
+                    onClick = onAutoStart,
+                    // 系统能探测到就不需要用户手动确认；探测不到交给用户标记
+                    manualToggle = if (autoStartKnown) null else {
+                        { onAutoStartToggle(!autoStart) }
+                    }
+                )
+            }
+            item {
+                PermCard(
+                    title = "锁定后台",
+                    desc = "MIUI 专属。打开最近任务，长按农场助手卡片 → 锁定，再把省电策略设为「无限制」，避免后台被清理",
+                    ok = lock,
+                    tag = "可选",
+                    optional = true,
+                    onClick = onLock,
+                    manualToggle = { onLockToggle(!lock) }
+                )
+            }
+            item {
+                PermCard(
+                    title = "无障碍保活开关",
+                    desc = "在系统快捷开关面板里加一个「农场保活」磁贴，让系统一直持有本应用，无障碍服务不容易被回收（与 GKD 的做法相同）",
+                    ok = tile,
+                    tag = "可选",
+                    optional = true,
+                    onClick = onTile
                 )
             }
         }
@@ -236,17 +312,27 @@ private fun PermCard(
     title: String,
     desc: String,
     ok: Boolean,
-    required: Boolean,
     onClick: () -> Unit,
+    tag: String? = null,
+    /** 可选增强项：未开启时用中性色，不摆出「出错」的红色告警感 */
+    optional: Boolean = false,
     manualToggle: (() -> Unit)? = null,
 ) {
-    val accent = if (ok) Cyan else Warn
+    val accent = when {
+        ok -> Cyan
+        optional -> TextTertiary
+        else -> Warn
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
             .background(Surface1)
-            .border(1.dp, if (ok) Line else Warn.copy(alpha = 0.28f), RoundedCornerShape(16.dp))
+            .border(
+                1.dp,
+                if (ok || optional) Line else Warn.copy(alpha = 0.28f),
+                RoundedCornerShape(16.dp)
+            )
             .clickable { onClick() }
             .padding(14.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -269,7 +355,7 @@ private fun PermCard(
         Column(Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(title, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                if (!required) {
+                if (tag != null) {
                     Spacer(Modifier.width(6.dp))
                     Box(
                         Modifier
@@ -277,7 +363,7 @@ private fun PermCard(
                             .background(Surface2)
                             .padding(horizontal = 5.dp, vertical = 1.dp)
                     ) {
-                        Text("建议", color = TextTertiary, fontSize = 10.sp)
+                        Text(tag, color = TextTertiary, fontSize = 10.sp)
                     }
                 }
             }

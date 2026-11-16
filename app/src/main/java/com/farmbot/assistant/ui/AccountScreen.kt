@@ -71,6 +71,7 @@ fun AccountScreen(
     onApplyScan: () -> Unit,
     onDismissScan: () -> Unit,
     onStart: () -> Unit,
+    onOpenPerms: () -> Unit,
 ) {
     val farmCount = accounts.sumOf { it.farms.size }
     val selected = accounts.sumOf { it.activeFarms.size }
@@ -80,7 +81,7 @@ fun AccountScreen(
             .fillMaxSize()
             .background(Bg)
     ) {
-        Header(accounts.size, farmCount, selected)
+        Header(accounts.size, farmCount, selected, onOpenPerms)
         LazyColumn(
             modifier = Modifier.weight(1f),
             contentPadding = PaddingValues(start = 18.dp, end = 18.dp, bottom = 28.dp),
@@ -169,7 +170,7 @@ private fun BottomBar(count: Int, enabled: Boolean, onStart: () -> Unit) {
 }
 
 @Composable
-private fun Header(accounts: Int, farms: Int, selected: Int) {
+private fun Header(accounts: Int, farms: Int, selected: Int, onOpenPerms: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -181,6 +182,16 @@ private fun Header(accounts: Int, farms: Int, selected: Int) {
             Spacer(Modifier.height(4.dp))
             Text("多账号 · 王者农场自动化", color = TextSecondary, fontSize = 12.sp)
         }
+        Box(
+            Modifier
+                .clip(RoundedCornerShape(10.dp))
+                .background(Surface2)
+                .clickable { onOpenPerms() }
+                .padding(horizontal = 10.dp, vertical = 6.dp)
+        ) {
+            Text("权限", color = TextSecondary, fontSize = 12.sp)
+        }
+        Spacer(Modifier.width(8.dp))
         Box(
             Modifier
                 .clip(RoundedCornerShape(10.dp))

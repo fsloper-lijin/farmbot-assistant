@@ -30,6 +30,13 @@ data class PermState(
     val notif: Boolean = false,
     val overlay: Boolean = false,
     val manual: Boolean = false,
+    /** 可选增强项：以下都不参与放行判断，只影响「到点自动跑」的成功率 */
+    val alarm: Boolean = false,
+    val autoStart: Boolean = false,
+    /** 自启动是否被系统真实探测到；false 表示探测不到，状态以用户手动确认为准 */
+    val autoStartKnown: Boolean = false,
+    val lock: Boolean = false,
+    val tile: Boolean = false,
 ) {
     /** 三项系统可检测的权限齐了才放行 */
     val ready: Boolean get() = acc && notif && overlay
@@ -55,6 +62,8 @@ class MainActivity : ComponentActivity() {
         setContent {
             FarmBotTheme {
                 var accounts by remember { mutableStateOf(initial) }
+                // 必备权限齐了之后，仍可从账号页点「权限」回到这里查看/调整增强项
+                var showPerms by remember { mutableStateOf(false) }
 
                 fun update(next: List<Account>) {
                     accounts = next
@@ -62,12 +71,17 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val p = perms.value
-                if (!p.ready) {
+                if (!p.ready || showPerms) {
                     PermissionScreen(
                         accessibility = p.acc,
                         notifications = p.notif,
                         overlay = p.overlay,
                         manual = p.manual,
+                        alarm = p.alarm,
+                        autoStart = p.autoStart,
+                        autoStartKnown = p.autoStartKnown,
+                        lock = p.lock,
+                        tile = p.tile,
                         onAutoGrant = { startAutoGrant() },
                         onAccessibility = {
                             if (!Perms.openAccessibility(this)) {
@@ -89,7 +103,38 @@ class MainActivity : ComponentActivity() {
                             Perms.setManualConfirmed(this, ok)
                             refreshPerms()
                         },
-                        onEnter = {}
+                        onAlarm = {
+                            if (!Perms.openExactAlarm(this)) {
+                                toast("无法打开精确闹钟设置页，请到应用权限里手动开启「闹钟和提醒」")
+                            }
+                        },
+                        onAutoStart = {
+                            if (!Perms.openAutoStart(this)) {
+                                toast("无法打开自启动设置页，请到安全中心手动开启")
+                            }
+                        },
+                        onAutoStartToggle = { ok ->
+                            Perms.setAutoStartConfirmed(this, ok)
+                            refreshPerms()
+                        },
+                        onLock = {
+                            toast("已打开省电策略，建议选「无限制」；锁后台请到最近任务里长按农场助手卡片")
+                            if (!Perms.openBatteryPolicy(this)) {
+                                toast("无法打开省电策略页")
+                            }
+                        },
+                        onLockToggle = { ok ->
+                            Perms.setLockConfirmed(this, ok)
+                            refreshPerms()
+                        },
+                        onTile = {
+                            Perms.requestAddTile(this) { msg ->
+                                toast(msg)
+                                // 系统弹窗关闭后 Activity 未必重新 resume，这里主动刷一次
+                                window.decorView.postDelayed({ refreshPerms() }, 400)
+                            }
+                        },
+                        onEnter = { showPerms = false }
                     )
                 } else {
                     val targetName = accounts.firstOrNull { it.id == scanAccountId }?.let { a ->
@@ -108,6 +153,10 @@ class MainActivity : ComponentActivity() {
                         onRemove = { id -> update(accounts.filterNot { it.id == id }) },
                         onOpenAccessibility = {
                             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                        },
+                        onOpenPerms = {
+                            showPerms = true
+                            refreshPerms()
                         },
                         onScan = { acc ->
                             scanAccountId = acc.id
@@ -208,12 +257,19 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refreshPerms() {
+        // 自启动：系统能探测到就用真实值，探测不到用用户手动确认的值
+        val autoStartProbe = Perms.autoStartState(this)
         perms.value = PermState(
             // 设置项与「服务是否真的连着」取或关系：任一成立即视为开启，避免误判把用户挡在门外
             acc = Perms.accessibilityEnabled(this) || BotService.isReady,
             notif = Perms.notificationsEnabled(this),
             overlay = Perms.overlayEnabled(this),
             manual = Perms.manualConfirmed(this),
+            alarm = Perms.canScheduleExactAlarms(this),
+            autoStart = autoStartProbe ?: Perms.autoStartConfirmed(this),
+            autoStartKnown = autoStartProbe != null,
+            lock = Perms.lockConfirmed(this),
+            tile = Perms.tileAdded(this),
         )
     }
 
