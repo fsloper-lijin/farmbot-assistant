@@ -26,7 +26,26 @@
 
 项目**不修改游戏客户端、不读写游戏内存、不注入任何代码、不绕过反作弊**，只是"用程序代替手指点击屏幕"——但这并不改变它违反用户协议的事实，请务必阅读上方的风险警告。
 
-## 二、当前完成度
+## 二、开发方式与测试环境
+
+**本项目由 AI 全程编写**，属于 AI 驱动开发的实验性项目：
+
+- **开发工具**：字节跳动旗下的 AI 编程助手 **Trae**
+- **参与模型**：DeepSeek V4.1 Flash、小米 MiMo V2.6 Flash
+- **人工角色**：人类只负责提出需求、审查代码与真机验证，不手写实现
+
+**测试设备均为小米 / 红米，系统均为 HyperOS 4.0：**
+
+| 设备 | 类型 | 系统版本 |
+| --- | --- | --- |
+| 红米 K40 Pro | 手机 | 第三方魔改 HyperOS 4.0（底包：小米17 Ultra） |
+| 红米 K80 Ultra | 手机 | 官方 HyperOS 4.0 |
+| 小米平板 Pad 6 Pro | 平板 | 第三方魔改 HyperOS 4.0（底包：小米17 Pro Max） |
+
+> ⚠️ 本项目**只在 HyperOS 4.0 上实测通过**。ColorOS、OriginOS 及其他魔改系统**未做适配与验证**，
+> 无障碍授权、自启动、后台保活等逻辑依赖小米私有能力，**很可能无法正常运行**。
+
+## 三、当前完成度
 
 **这是一个半成品，不要期待开箱即用。**
 
@@ -42,7 +61,7 @@
 
 也就是说：「开始执行」目前只负责**拉起游戏 + 显示悬浮窗**，之后不会做任何事。
 
-## 三、技术要点
+## 四、技术要点
 
 - **无障碍节点树读不到游戏内容**：王者是 Unity 自绘界面，节点树为空，只能走 `takeScreenshot()` + OCR。
 - **OCR 用 ML Kit 中文离线模型**（`text-recognition-chinese`），整屏 1x 识别，对缺名称的条目再局部裁剪 5x 补识别。
@@ -50,7 +69,7 @@
 - **悬浮窗**：`TYPE_APPLICATION_OVERLAY`，`FLAG_NOT_FOCUSABLE | FLAG_NOT_TOUCH_MODAL | FLAG_LAYOUT_IN_SCREEN`，自定义 `onTouch` 区分"拖动"与"点击"，位置写入 SharedPreferences。
 - **权限判定**：系统可能把服务名存成缩写形式（`pkg/.bot.BotService`），比较前需把前导点展开为完整类名。
 
-## 四、权限清单
+## 五、权限清单
 
 **必备（不齐无法进入主界面）**
 
@@ -75,13 +94,13 @@
 （`setExactAndAllowWhileIdle` + `RTC_WAKEUP`）。到点会响铃、震动、**点亮屏幕**并尝试把助手拉到前台，
 可以按 Home 键切到后台观察，倒计时期间可随时点「取消」。
 
-## 五、环境要求
+## 六、环境要求
 
 - Android **11 (API 30)** 及以上（`minSdk 30`, `targetSdk 34`）
 - JDK 17，Android SDK 34
 - 设备与游戏的分辨率/坐标强相关，本项目在 **2400×1080 横屏**下调试，其他分辨率需要重新标定
 
-## 六、构建
+## 七、构建
 
 ```bash
 git clone https://github.com/fsloper-lijin/farmbot-assistant.git
@@ -113,7 +132,7 @@ adb shell appops set com.farmbot.assistant SYSTEM_ALERT_WINDOW allow
 
 > ⚠️ `pm grant` **不加 `--user 0` 会静默失败**。
 
-## 七、使用流程
+## 八、使用流程
 
 1. 打开 App → 按引导开启 **无障碍 / 通知 / 悬浮窗** 三项权限（缺一项进不去主界面）
 2. 添加账号 → 在账号卡片里点「扫描区服」→ 切到游戏「选择服务器」页面 → 回到 App 等待 OCR 结果
@@ -121,7 +140,7 @@ adb shell appops set com.farmbot.assistant SYSTEM_ALERT_WINDOW allow
 4. 点击底部固定的「开始执行」→ 自动拉起王者荣耀 → 左侧出现悬浮窗
 5. 点悬浮窗左侧区域返回 App，点 ✕ 关闭悬浮窗
 
-## 八、目录结构
+## 九、目录结构
 
 ```
 app/src/main/java/com/farmbot/assistant/
@@ -138,7 +157,7 @@ app/src/main/java/com/farmbot/assistant/
 tools/                       # 调试脚本（控件树 dump / 截图放大）
 ```
 
-## 九、已知限制
+## 十、已知限制
 
 - 未适配多分辨率，坐标写死在 2400×1080 基准上
 - MIUI/HyperOS 无法通过程序代点系统权限开关（系统安全限制），只能引导用户手动开启
@@ -146,7 +165,7 @@ tools/                       # 调试脚本（控件树 dump / 截图放大）
 - 首次跨应用启动游戏会弹「启动应用」确认框（即 MIUI 的"打开其他应用"权限），选"始终允许"后永久生效
 - 悬浮窗目前是静态文案，**没有停止按钮**，要中断只能在系统里强停 App
 
-## 十、免责声明
+## 十一、免责声明
 
 **请在使用或分发本项目前完整阅读以下内容。使用即表示你已知悉并接受全部条款。**
 
@@ -162,6 +181,6 @@ tools/                       # 调试脚本（控件树 dump / 截图放大）
 
 ---
 
-## 十一、License
+## 十二、License
 
 本项目以 **MIT License** 发布，但**上述免责声明优先于 License 中的任何条款**。任何再分发必须完整保留本 README 中的风险警告与免责声明。
