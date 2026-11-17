@@ -356,6 +356,11 @@ object AddAccountFlow {
         }
     }
 
+    /** 大厅里长得像昵称的按钮/面板文字（整行相等才排除，避免误杀真昵称） */
+    private val LOBBY_UI_WORDS = setOf(
+        "开始游戏", "换区", "选择服务器", "设置", "活动", "商城", "背包", "好友", "公告", "排位"
+    )
+
     /** 右上角昵称：排除「退出」「12+」这类按钮文字 */
     private fun pickNickname(
         lines: List<Ocr.ScanLine>,
@@ -363,16 +368,34 @@ object AddAccountFlow {
         h: Int,
         region: Boolean,
     ): String {
-        return lines.asSequence()
-            .filter { !region || (it.box.left > w * 0.72f && it.box.top < h * 0.14f) }
-            .map { it.text.replace("退出", "").trim() }
-            .filter { t ->
-                t.length in 2..16 &&
-                    !t.contains("12+") &&
-                    !t.matches(Regex("[0-9+\\-—·.]+"))
-            }
+        fun clean(raw: String): String = raw
+            .replace("退出", "")
+            .replace(Regex("[「」\"'`·,，。|｜]"), "")
+            .trim()
+            .replace(Regex("\\s+"), " ")
+
+        fun ok(t: String): Boolean =
+            t.length in 2..16 &&
+                !t.contains("12+") &&
+                !t.matches(Regex("[0-9+\\-—·.]+")) &&
+                t !in LOBBY_UI_WORDS
+
+        // 1) 昵称和「退出」同一行（OCR 常拼成「昵称 退出」）：拿它当锚点。
+        //    平板 21:9 上下黑边会把整块游戏 UI 下移，昵称实测在 0.183h，
+        //    写死 y<0.14h 的区域内过滤在平板上会把昵称整行滤掉
+        lines.asSequence()
+            .filter { it.text.contains("退出") }
+            .map { clean(it.text) }
+            .filter { ok(it) }
             .maxByOrNull { it.length }
-            ?.replace(Regex("\\s+"), " ")
+            ?.let { return it }
+
+        // 2) 退回右上角区域候选：区域放宽到 0.26h 覆盖平板，手机不受影响
+        return lines.asSequence()
+            .filter { !region || (it.box.left > w * 0.72f && it.box.top < h * 0.26f) }
+            .map { clean(it.text) }
+            .filter { ok(it) }
+            .maxByOrNull { it.length }
             .orEmpty()
     }
 

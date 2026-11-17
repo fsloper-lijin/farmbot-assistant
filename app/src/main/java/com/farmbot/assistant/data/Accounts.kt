@@ -43,6 +43,8 @@ data class Account(
     val name: String = "",
     /** QQ 昵称（QQ 切号列表里显示的名字）。游戏身份名 ≠ QQ 昵称时用于选对 QQ 账号 */
     val qqNick: String = "",
+    /** QQ 号：切号列表里 OCR 到的数字，也可以手动填；微信账号恒为空 */
+    val qqNo: String = "",
     val loginType: LoginType = LoginType.QQ,
     /**
      * 该 QQ 账号下可选的游戏身份（QQ 授权页「你可以使用不同的头像/昵称登录」那张列表里的昵称）。
@@ -58,6 +60,9 @@ data class Account(
 class AccountStore(private val ctx: Context) {
 
     private val file: File get() = File(ctx.filesDir, "accounts.json")
+
+    /** 是否已经有过账号数据（用来区分首次安装，首次安装要预置微信 + QQ 两张卡） */
+    fun exists(): Boolean = file.exists()
 
     fun load(): List<Account> = runCatching {
         if (!file.exists()) {
@@ -84,6 +89,7 @@ class AccountStore(private val ctx: Context) {
             id = o.optString("id", UUID.randomUUID().toString()),
             name = o.optString("name", ""),
             qqNick = o.optString("qqNick", ""),
+            qqNo = o.optString("qqNo", ""),
             loginType = LoginType.fromName(o.optString("loginType")),
             identities = o.optJSONArray("identities")?.let { arr ->
                 (0 until arr.length()).map { i -> arr.optString(i, "") }.filter { it.isNotEmpty() }
@@ -101,6 +107,7 @@ class AccountStore(private val ctx: Context) {
                     put("id", a.id)
                     put("name", a.name)
                     if (a.qqNick.isNotEmpty()) put("qqNick", a.qqNick)
+                    if (a.qqNo.isNotEmpty()) put("qqNo", a.qqNo)
                     put("loginType", a.loginType.name)
                     put("enabled", a.enabled)
                     if (a.identities.isNotEmpty()) put("identities", JSONArray().apply {

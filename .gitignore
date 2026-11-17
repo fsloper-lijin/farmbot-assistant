@@ -27,6 +27,8 @@ signing.properties
 # ---- 本机私有资料 ----
 # 交接笔记里含个人设备信息，不进公开仓库
 HANDOFF.md
+# 旧版交接归档：含真实设备序列号与账号昵称（项目规则第 1 节），不进公开仓库
+docs/history.md
 # 调试过程中产生的截图/控件树 dump
 _shots/
 _seed/
@@ -36,6 +38,7 @@ _seed/
 .workbuddy/
 # 调试截图
 agreement.png
+/*.png
 
 # ---- 系统垃圾 ----
 .DS_Store

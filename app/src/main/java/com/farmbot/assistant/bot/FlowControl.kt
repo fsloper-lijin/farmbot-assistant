@@ -21,6 +21,15 @@ object FlowControl {
     /** 正在跑的是什么，用于界面/日志 */
     val label = mutableStateOf("")
 
+    /**
+     * 每次强制停止自增一次。多账号串行队列靠它判断「这一轮是不是被用户打断了」：
+     * 队列在每个账号结束到下一个账号开始之间没有 token 可查（FlowControl.running 已经 false），
+     * 只能记住起始 epoch 再比较。
+     */
+    @Volatile
+    var cancelEpoch: Int = 0
+        private set
+
     fun begin(what: String): Int {
         token++
         label.value = what
@@ -38,6 +47,7 @@ object FlowControl {
     /** 强制停止：作废所有在跑的循环 */
     fun cancel() {
         token++
+        cancelEpoch++
         running.value = false
         label.value = ""
     }

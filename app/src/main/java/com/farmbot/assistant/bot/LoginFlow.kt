@@ -1,4 +1,4 @@
-package com.farmbot.assistant.bot
+﻿package com.farmbot.assistant.bot
 
 import android.content.Context
 import android.graphics.Rect
@@ -12,203 +12,21 @@ import com.farmbot.assistant.ocr.Ocr
 import com.farmbot.assistant.perm.Perms
 
 /**
- * 单个账号「试登录」：把王者荣耀带到该账号登录方式对应的入口。
+ * 账号自动登录：从大厅外一路带到「已登录该账号的大厅」。
  *
- * 本期只做到「发起」这一步：
- *  - QQ / 微信：点「与QQ好友玩 / 与微信好友玩」，之后由 QQ/微信 自己弹授权，用户确认；
- *  - QQ/微信 扫码：点右上角二维码图标 → 选「扫码授权」，把二维码留在屏幕上，
- *    用户用另一台设备扫码；扫码成功后游戏会自己进大厅，后续自动化再迭代。
+ * QQ 走「选号选身份」：卡里已存 QQ 昵称 + 身份时直接按名字选号，不再每次重扫切号列表；
+ * 只有还空着的账号才进列表清点。微信直接点「与微信好友玩」。
  *
  * 游戏是 Unity 自绘，无障碍节点树拿不到文字，只能靠截图 OCR 定位。
  */
 object LoginFlow {
 
     private const val TAG = "Login"
-    private const val MAX_POLLS = 40          // 每 1.2s 一轮，约 48s
     /** 身份列表最多向下翻几页 / 找目标时最多向上翻几页 */
     private const val IDENTITY_MAX_SCROLLS = 8
     private const val IDENTITY_MAX_UP_SCROLLS = 10
-    private const val QR_ICON_X = 0.913f      // 登录页右上角二维码图标的相对位置（2400x1080 实测）
-    private const val QR_ICON_Y = 0.20f
 
     private val main = Handler(Looper.getMainLooper())
-
-    @Volatile
-    private var running = false
-    /** 试登录这一轮的取消令牌 */
-    private var runToken = 0
-
-    fun start(ctx: Context, acc: Account, done: (String) -> Unit) {
-        if (running) {
-            done("上一次试登录还没结束")
-            return
-        }
-        if (FlowControl.running.value) {
-            done("有自动化正在执行，请先点「停止」")
-            return
-        }
-        if (!BotService.isReady) {
-            done("${Perms.accessibilityReason(ctx)}，无法自动登录")
-            return
-        }
-        running = true
-        runToken = FlowControl.begin("试登录")
-        IO.log(ctx, TAG, "试登录 账号=${acc.name.ifEmpty { acc.id }} 方式=${acc.loginType.name}")
-
-        if (BotService.foregroundPackage() == GameLauncher.PACKAGE) {
-            poll(ctx, acc, 0) { msg -> finish(ctx, msg, done) }
-        } else {
-            if (!GameLauncher.launch(ctx)) {
-                finish(ctx, "无法启动王者荣耀", done)
-                return
-            }
-            done("正在启动王者荣耀，稍后按「${acc.loginType.label}」登录…")
-            waitGame(ctx, acc, 0) { msg -> finish(ctx, msg, done) }
-        }
-    }
-
-    private fun finish(ctx: Context, msg: String, done: (String) -> Unit) {
-        if (!running) return
-        running = false
-        FlowControl.end(runToken)
-        IO.log(ctx, TAG, "结束：$msg")
-        done(msg)
-    }
-
-    private fun waitGame(ctx: Context, acc: Account, attempt: Int, done: (String) -> Unit) {
-        if (!FlowControl.alive(runToken)) {
-            finish(ctx, "已强制停止", done)
-            return
-        }
-        if (attempt > 40) {
-            done("等不到游戏切到前台，请手动打开王者荣耀后再试")
-            return
-        }
-        main.postDelayed({
-            if (BotService.foregroundPackage() == GameLauncher.PACKAGE) {
-                poll(ctx, acc, 0, done)
-            } else {
-                waitGame(ctx, acc, attempt + 1, done)
-            }
-        }, 1000)
-    }
-
-    private fun poll(ctx: Context, acc: Account, attempt: Int, done: (String) -> Unit) {
-        if (!FlowControl.alive(runToken)) {
-            finish(ctx, "已强制停止", done)
-            return
-        }
-        if (attempt >= MAX_POLLS) {
-            done("没有在游戏里找到登录入口，请手动登录")
-            return
-        }
-        main.postDelayed({
-            if (BotService.foregroundPackage() != GameLauncher.PACKAGE) {
-                poll(ctx, acc, attempt + 1, done)
-                return@postDelayed
-            }
-            BotService.capture { bmp ->
-                if (bmp == null) {
-                    poll(ctx, acc, attempt + 1, done)
-                    return@capture
-                }
-                Ocr.recognize(bmp) { lines ->
-                    onLines(ctx, acc, bmp.width, bmp.height, lines, attempt + 1, done)
-                }
-            }
-        }, 1200)
-    }
-
-    private fun onLines(
-        ctx: Context,
-        acc: Account,
-        w: Int,
-        h: Int,
-        lines: List<Ocr.ScanLine>,
-        next: Int,
-        done: (String) -> Unit,
-    ) {
-        fun hit(item: Ui.Item) = Ui.line(lines, item)
-
-        if (!FlowControl.alive(runToken)) {
-            finish(ctx, "已强制停止", done)
-            return
-        }
-
-        // 首次启动/协议更新会挡一个「同意」弹窗
-        val agree = hit(Ui.AGREE_ANY)
-        val hasAgreement = Ui.has(lines, Ui.AGREEMENT_TEXT)
-        if (agree != null && hasAgreement) {
-            tapLine(ctx, agree, "同意协议")
-            poll(ctx, acc, next, done)
-            return
-        }
-
-        val qqLogin = hit(Ui.QQ_LOGIN)
-        val wxLogin = hit(Ui.WX_LOGIN)
-        val qrQQ = hit(Ui.QR_AUTH_QQ)
-        val qrWX = hit(Ui.QR_AUTH_WX)
-        val qrPage = hit(Ui.QR_PAGE_TITLE) ?: hit(Ui.QR_MENU_QQ) ?: hit(Ui.QR_MENU_WX)
-        val lobby = hit(Ui.GAME_START) ?: hit(Ui.CHANGE_AREA)
-
-        // 已经登录进大厅了，不用再点登录
-        if (lobby != null && qqLogin == null && wxLogin == null && qrPage == null) {
-            done("当前已是登录状态，无需重复登录")
-            return
-        }
-
-        when (acc.loginType) {
-            LoginType.QQ -> if (qqLogin != null) {
-                tapLine(ctx, qqLogin, "与QQ好友玩")
-                done("已点击「与QQ好友玩」，请在 QQ 弹窗里确认授权")
-                return
-            }
-
-            LoginType.WECHAT -> if (wxLogin != null) {
-                tapLine(ctx, wxLogin, "与微信好友玩")
-                done("已点击「与微信好友玩」，请在微信弹窗里确认授权")
-                return
-            }
-
-            LoginType.QQ_QR -> when {
-                qrPage != null -> {
-                    done("二维码已显示，请用另一台手机的 QQ 扫码授权")
-                    return
-                }
-                qrQQ != null -> {
-                    tapLine(ctx, qrQQ, "QQ扫码授权")
-                    poll(ctx, acc, next, done)
-                    return
-                }
-                qqLogin != null || wxLogin != null -> {
-                    BotService.tap((w * QR_ICON_X).toInt(), (h * QR_ICON_Y).toInt())
-                    IO.log(ctx, TAG, "打开扫码菜单")
-                    poll(ctx, acc, next, done)
-                    return
-                }
-            }
-
-            LoginType.WECHAT_QR -> when {
-                qrPage != null -> {
-                    done("二维码已显示，请用另一台手机的微信扫码授权")
-                    return
-                }
-                qrWX != null -> {
-                    tapLine(ctx, qrWX, "微信扫码授权")
-                    poll(ctx, acc, next, done)
-                    return
-                }
-                qqLogin != null || wxLogin != null -> {
-                    BotService.tap((w * QR_ICON_X).toInt(), (h * QR_ICON_Y).toInt())
-                    IO.log(ctx, TAG, "打开扫码菜单")
-                    poll(ctx, acc, next, done)
-                    return
-                }
-            }
-        }
-
-        poll(ctx, acc, next, done)
-    }
 
     private fun tapLine(ctx: Context, line: Ocr.ScanLine, what: String) {
         val x = line.box.centerX()
@@ -220,8 +38,13 @@ object LoginFlow {
     // ------------------------------------------------------------------
     // 已有账号时的全自动登录
     //   登录页 → 与QQ好友玩 → 系统「想要打开QQ」→ 允许
-    //   → QQ 小窗：切换账号 → 选到账号昵称 → 登录
-    //   → 游戏回到大厅
+    //   → QQ 授权窗口：切换账号 → 切号列表记下所有 QQ 号
+    //   → 逐个点开，把每个 QQ 号下的全部游戏身份抓全（不点同意、不产生登录）
+    //   → 回到目标 QQ，选中目标身份 → 同意 ×2 → 游戏大厅
+    //
+    // 为什么只对「还空着的账号」清点：QQ 授权页默认停在「上次登录的号」上，小窗里的
+    // 身份列表只露出一两行，不知道身份就没法选。账号卡里存过 QQ 昵称 + 身份之后，
+    // 直接按名字找号 → 选身份，不再每次重扫一遍切号列表。
     // 微信没有多账号问题：点「与微信好友玩」后微信直接授权。
     // ------------------------------------------------------------------
 
@@ -240,57 +63,119 @@ object LoginFlow {
     private var autoRunning = false
     /** 自动登录这一轮的取消令牌 */
     private var autoToken = 0
-    private var autoSwitched = false
-    private var autoPicked = false
     private var autoTappedAt = 0L
-    /** 授权页一上是否已点过目标游戏身份行（大号/小号这类创建的身份） */
-    private var autoIdentityPicked = false
-    /** 切号列表里实际点中的那行文字（QQ 昵称），登录成功后用于学习 qqNick 映射 */
+    /** 切号列表里实际点中的 QQ 昵称，登录成功后用于回写 qqNick */
     private var autoPickedText = ""
-    /** 身份区放大补识别连续失败的轮数；超过 3 轮放弃选身份，直接同意走自愈 */
-    private var identityZoomFails = 0
-    /** 对勾没落到目标身份行时重新点选的次数（最多 2 次，防止无限点） */
-    private var identityRetaps = 0
-    /** 授权页身份列表：已扫到的昵称（跨轮次累加，原始身份固定排第一） */
-    private val identitySeen = LinkedHashSet<String>()
-    /** 已确认扫到底（一屏只放得下 2 个身份，3~5 个必须向下翻） */
-    private var identityScanDone = false
-    /** 连续向下翻了却没有新昵称的轮数，达到 2 轮即认为到底 */
-    private var identityIdleScrolls = 0
-    /** 向下翻页次数（最多 IDENTITY_MAX_SCROLLS 轮） */
-    private var identityScrolls = 0
-    /** 找目标身份时向上翻回的次数 */
-    private var identityUpScrolls = 0
-    /** QQ 原始身份昵称（副标题「QQ头像昵称」那行） */
-    private var identityOrigName = ""
-    /** 上一帧可见的身份行（判断翻页有没有真的生效） */
-    private var identityLastVisible: List<String> = emptyList()
-    /** 上一轮发过翻页，等这一帧核对效果 */
-    private var identityScrollPending = false
-    /** 上一轮翻页方向：true=向上找目标 */
-    private var identityScrollingUp = false
-    /** 已确认回到列表顶部（向上翻页也没新内容） */
-    private var identityUpDone = false
-
-    /** 每次重新登录都从第一屏重新扫身份列表 */
-    private fun resetIdentityScan() {
-        identitySeen.clear()
-        identityScanDone = false
-        identityIdleScrolls = 0
-        identityScrolls = 0
-        identityUpScrolls = 0
-        identityOrigName = ""
-        identityLastVisible = emptyList()
-        identityScrollPending = false
-        identityScrollingUp = false
-        identityUpDone = false
-    }
     /** 已尝试「退出重登」的次数，防止昵称一直对不上时无限循环 */
     private var logoutAttempts = 0
     /** 大厅帧里没找到「换区」入口时的重试次数（换区字号小，OCR 首帧常漏） */
     private var lobbyVisits = 0
-    /** 已被其他 QQ 账号占用的 QQ 昵称：切号列表里要跳过它们 */
+    /** 已被其他 QQ 账号占用的 QQ 昵称/游戏身份：挑新身份时要跳过 */
     private var excludeQq: Set<String> = emptySet()
+
+    // ---- QQ 切号列表 / 身份目录 ----
+
+    private enum class QqMode {
+        /** 清点阶段：把所有 QQ 号的身份列表抓全 */
+        SCAN,
+        /** 登录阶段：选中目标 QQ 的目标身份 */
+        TARGET,
+    }
+
+    /** 切号列表里的一个 QQ 账号（QQ 昵称 + QQ 号 + 昵称行位置） */
+    private data class QqSlot(val nick: String, val no: String, val box: Rect)
+
+    private var qqMode = QqMode.SCAN
+    /** 切号列表扫到的 QQ 账号（按列表顺序去重） */
+    private val qqSlots = ArrayList<QqSlot>()
+    /** 清点结果：QQ 昵称 → 该号下的全部游戏身份（原始身份固定排第一） */
+    private val qqCatalog = LinkedHashMap<String, List<String>>()
+    /** 刚点开、正在等身份页出现的 QQ 昵称 */
+    private var qqWaitNick: String? = null
+    private var qqTarget: QqSlot? = null
+    private var qqTargetIdent = ""
+    private var qqPickedIdentity = false
+    private var qqIdentityRetaps = 0
+    /** 目标身份已经点过「同意」的时间；>0 表示授权页一已过，后面只等第二页 */
+    private var qqAgreedAt = 0L
+    /** 身份页和点击的 QQ 对不上时回列表重选的次数 */
+    private var qqSwitchTries = 0
+    /** 切号列表是否已向下翻过（账号多于一屏时） */
+    private var qqPickerScrolled = false
+    private var qqPickerMark = 0
+    /** 目标 QQ 不在当前一屏时翻列表找的方向/次数 */
+    private var qqPickerFindForward = true
+    private var qqPickerFindScrolls = 0
+    /** 目标身份不在当前一屏时翻身份列表找的方向/次数/连续无变化次数 */
+    private var qqFindForward = true
+    private var qqFindScrolls = 0
+    private var qqFindSame = 0
+    private var qqFindFlips = 0
+    private var qqFindLastVisible: List<String> = emptyList()
+    /** 小窗拉全屏已尝试次数（下滑白条手势失败上限，防止一直只做手势不登录） */
+    private var qqExpandTries = 0
+    /** 上一次下滑白条的时间：手势之间要留动画生效的空档 */
+    private var qqExpandAt = 0L
+
+    // ---- 当前身份页的翻页扫描 ----
+
+    /** 当前身份页已扫到的昵称（原始身份固定排第一） */
+    private val identSeen = LinkedHashSet<String>()
+    /** QQ 原始身份昵称（副标题「QQ头像昵称」那行） */
+    private var identOrig = ""
+    private var identIdle = 0
+    private var identScrolls = 0
+    private var identPending = false
+    private var identLastVisible: List<String> = emptyList()
+
+    /** 换一个 QQ 号时重置身份页扫描状态 */
+    private fun resetIdentScan() {
+        identSeen.clear()
+        identOrig = ""
+        identIdle = 0
+        identScrolls = 0
+        identPending = false
+        identLastVisible = emptyList()
+    }
+
+    /** 换一个 QQ 号时重置「在身份列表里找目标身份」的状态 */
+    private fun resetQqFind() {
+        qqFindForward = true
+        qqFindScrolls = 0
+        qqFindSame = 0
+        qqFindFlips = 0
+        qqFindLastVisible = emptyList()
+    }
+
+    /** 每次自动登录 / 退出重登后重置 QQ 清点状态 */
+    private fun resetQqFlow(keepTarget: Boolean = false) {
+        qqSlots.clear()
+        qqCatalog.clear()
+        qqWaitNick = null
+        qqPickedIdentity = false
+        qqIdentityRetaps = 0
+        qqAgreedAt = 0L
+        qqSwitchTries = 0
+        qqPickerScrolled = false
+        qqPickerMark = 0
+        qqPickerFindForward = true
+        qqPickerFindScrolls = 0
+        qqExpandTries = 0
+        qqExpandAt = 0L
+        resetIdentScan()
+        resetQqFind()
+        // 已经知道要登哪个 QQ 号、哪个身份时（来自账号卡），退出重登后也不退回清点模式
+        if (!keepTarget) {
+            qqMode = QqMode.SCAN
+            qqTarget = null
+            qqTargetIdent = ""
+        }
+    }
+
+    /** 本次清点到的其它 QQ 账号（除目标 QQ 外），只上报一次 */
+    private var discoveredCb: ((List<Account>) -> Unit)? = null
+    /** 登录成功后是否进「换区」面板同步区服。单独点「同步区服」时才为 true */
+    private var autoSyncFarms = true
 
     fun startAuto(
         ctx: Context,
@@ -298,6 +183,9 @@ object LoginFlow {
         status: (String) -> Unit,
         done: (Account, String) -> Unit,
         excludeQq: Set<String> = emptySet(),
+        /** false = 只登录，不进换区面板抓区服（日常执行走这条，省掉每个账号两次 OCR 同步） */
+        syncFarms: Boolean = true,
+        onDiscovered: (List<Account>) -> Unit = {},
     ) {
         if (autoRunning) {
             done(acc, "上一次自动登录还没结束")
@@ -312,20 +200,28 @@ object LoginFlow {
             return
         }
         if (acc.loginType == LoginType.QQ_QR || acc.loginType == LoginType.WECHAT_QR) {
-            done(acc, "扫码账号无法自动登录，请用「试登录」")
+            done(acc, "扫码账号无法自动登录，请手动扫码登录")
             return
         }
         this.excludeQq = excludeQq.map { it.replace(WS, "") }.filter { it.isNotBlank() }.toSet()
+        autoSyncFarms = syncFarms
+        discoveredCb = onDiscovered
         if (this.excludeQq.isNotEmpty()) IO.log(ctx, TAG, "切号时排除 QQ 账号=$excludeQq")
         autoRunning = true
         autoToken = FlowControl.begin("自动登录")
-        autoSwitched = false
-        autoPicked = false
-        autoIdentityPicked = false
         autoPickedText = ""
-        identityZoomFails = 0
-        identityRetaps = 0
-        resetIdentityScan()
+        resetQqFlow()
+        // 账号卡里已经存着 QQ 昵称 + 身份列表：不用再把切号列表逐个点开清点一遍，
+        // 直接按名字找到这个 QQ、选中这个身份 —— 手里有啥就用啥
+        val wantIdent = acc.name.replace(WS, "")
+        val knownIdent = wantIdent.isNotBlank() && acc.qqNick.isNotBlank() &&
+            acc.identities.any { plainText(it) == wantIdent }
+        if (knownIdent) {
+            qqMode = QqMode.TARGET
+            qqTarget = QqSlot(acc.qqNick, "", Rect())
+            qqTargetIdent = acc.identities.first { plainText(it) == wantIdent }
+            IO.log(ctx, TAG, "已知身份「${acc.qqNick}」->「$qqTargetIdent」，跳过 QQ 列表清点")
+        }
         autoTappedAt = 0L
         logoutAttempts = 0
         lobbyVisits = 0
@@ -429,15 +325,22 @@ object LoginFlow {
             return
         }
 
-        // 1.5) 版本更新公告等冷启动弹窗：只有右上角一个 ✕ 图钉按钮（OCR 读不到），
-        //      实测（平板 2880x1800）✕ 位于屏幕比例 (0.854, 0.173)，先按比例点掉
+        // 1.5) 版本更新公告等冷启动弹窗：只有右上角一个 ✕ 图形按钮（OCR 读不到），
+        //      按 OCR 标题行定位同高度的白色像素簇来点，点不到再按比例兜底
         if (fg == GameLauncher.PACKAGE &&
             Ui.has(lines, Ui.UPDATE_POPUP) && hit(Ui.AGREE_BTN) == null
         ) {
             if (System.currentTimeMillis() - autoTappedAt > 3000) {
                 autoTappedAt = System.currentTimeMillis()
-                BotService.tap((w * 0.854f).toInt(), (h * 0.173f).toInt())
-                IO.log(ctx, TAG, "关闭公告弹窗 (0.854,0.173)")
+                val title = lines.firstOrNull { it.text.contains("更新公告") }
+                    ?: lines.firstOrNull { Ui.matches(it.text, Ui.UPDATE_POPUP) }
+                val found = title?.let { findWhiteCluster(bmp, w, h, it.box) }
+                val x = found?.first ?: (w * 0.769f).toInt()
+                val y = found?.second
+                    ?: title?.box?.centerY()?.toInt()?.takeIf { it > h * 0.05f }
+                    ?: (h * 0.248f).toInt()
+                IO.log(ctx, TAG, "关闭公告弹窗 ($x,$y) 像素命中=${found != null} 标题=${title?.text}")
+                BotService.tap(x, y)
                 status("关闭公告弹窗…")
             }
             retry()
@@ -459,6 +362,12 @@ object LoginFlow {
         val qqLogin = hit(Ui.QQ_LOGIN)
         val wxLogin = hit(Ui.WX_LOGIN)
         if (fg == GameLauncher.PACKAGE && (qqLogin != null || wxLogin != null)) {
+            // 刚同意完 QQ 授权时登录页会短暂残留：这时再点一次「与QQ好友玩」会重新拉起
+            // 授权窗口，把正在进行的登录打断。留 20s 窗口，只等大厅
+            if (qqAgreedAt > 0L && System.currentTimeMillis() - qqAgreedAt < 20000) {
+                retry()
+                return
+            }
             val useWx = acc.loginType == LoginType.WECHAT
             val btn = if (useWx) wxLogin else qqLogin
             if (btn != null && System.currentTimeMillis() - autoTappedAt > 1500) {
@@ -470,249 +379,11 @@ object LoginFlow {
             return
         }
 
-        // 4) QQ 授权小窗（MIUI 自由窗口）。两层选择：
-        //      a. 切号列表「选择要登录的账号」：行显示 QQ 昵称+QQ号（QQ昵称≠游戏昵称，
-        //         如「主号」的 QQ 号下建了游戏身份「小号」）→ 按 qqNick 优先匹配账号行；
-        //      b. 授权页一「王者荣耀 申请使用 你的QQ头像、昵称和朋友关系」：
-        //         列出该 QQ 账号下的游戏登录身份（如 主号 / 小号）→ 点目标身份行选中；
-        //      c. 同意（第一次：同意登录账号）；
-        //      d. 授权页二「QQ 申请使用 你在王者荣耀的以下信息」→ 同意（第二次：读取社交信息）；
-        //      e. 回游戏大厅。
+        // 4) QQ 授权小窗（MIUI 自由窗口）：先清点所有 QQ 号的身份，再选目标身份登录
         if (fg == QQ_PKG) {
-            // QQ 授权小窗是标准原生控件（文本/边界都能精确读到）→ 优先走控件树。
-            // 比 OCR 强：整帧 OCR 常漏掉小窗里的身份行（如「小号」「大号」），
-            // 且 performAction 点击不受 MIUI 后台手势注入限制。
-            val winText = Nodes.allWindowsText()
-            val cool = System.currentTimeMillis() - autoTappedAt
-
-            if (winText.isNotBlank()) {
-                // 0) 授权页一「你可以使用不同的头像/昵称登录」：整页身份列表
-                //    抓全量昵称回写账号 → 点目标身份行 → 对勾核验 → 同意
-                if (Ui.inText(winText, Ui.IDENTITY_PAGE) || Ui.inText(winText, Ui.IDENTITY_SUBTITLE)) {
-                    val nodeLines = Nodes.allWindowsLines().map { Ocr.ScanLine(it.first, it.second) }
-                    val step = handleIdentityPage(ctx, acc, bmp, w, h, nodeLines, status) { row ->
-                        if (Nodes.clickByTextAllWindows(listOf(row.name)) == null) {
-                            BotService.tap(row.box.centerX(), row.box.centerY())
-                        }
-                    }
-                    if (step.page) {
-                        retry(step.acc)
-                        return
-                    }
-                }
-
-                // a) 切号列表页「选择要登录的账号」
-                if (Ui.inText(winText, Ui.PICKER_PAGE)) {
-                    val key = acc.qqNick.ifBlank { acc.name }
-                    if (cool > 1500) {
-                        var hitText: String? = null
-                        if (key.isNotBlank()) hitText = Nodes.clickByTextAllWindows(listOf(key))
-                        if (hitText == null) {
-                            // 新账号不知道 QQ 昵称 / 昵称对不上时：跳过已被其他账号占用的 QQ 号，
-                            // 在切号列表里选第一个没用过的（只认列表标题下方、弹窗宽度内的行）
-                            val all = Nodes.allWindowsLines()
-                            val title = all.firstOrNull {
-                                Ui.matches(it.first, Ui.PICKER_TITLE)
-                            }?.second
-                            val row = all
-                                .filter { (t, r) ->
-                                    isPickerRow(t) && !usedQq(t) &&
-                                        r.centerY() > (title?.bottom ?: (h * 0.2f).toInt()) &&
-                                        r.centerX() in (w * 0.1f).toInt()..(w * 0.9f).toInt()
-                                }
-                                .minByOrNull { it.second.top }
-                            if (row != null) {
-                                hitText = Nodes.clickByTextAllWindows(listOf(row.first))
-                                    ?: run {
-                                        BotService.tap(row.second.centerX(), row.second.centerY())
-                                        row.first
-                                    }
-                            }
-                            IO.log(ctx, TAG, "切号列表按排除集选行=${row?.first} 排除=$excludeQq")
-                            if (row == null) status("没有可用的 QQ 账号，请先在 QQ 里添加新账号")
-                        }
-                        if (hitText != null) {
-                            autoTappedAt = System.currentTimeMillis()
-                            autoPickedText = hitText.replace(WS, "")
-                            autoSwitched = true
-                            autoPicked = true
-                            IO.log(ctx, TAG, "节点点击 QQ账号「${hitText.trim()}」")
-                            status("已选择 QQ 账号「${hitText.trim()}」…")
-                        }
-                    }
-                    retry(); return
-                }
-
-                // b) 授权页：当前 QQ 账号的身份列表里有目标游戏昵称 → 先选中它
-                if (!autoIdentityPicked && acc.name.isNotBlank() && cool > 1200 &&
-                    winText.contains(acc.name)
-                ) {
-                    val hitText = Nodes.clickByTextAllWindows(listOf(acc.name))
-                    if (hitText != null) {
-                        autoTappedAt = System.currentTimeMillis()
-                        autoIdentityPicked = true
-                        IO.log(ctx, TAG, "节点点击 身份「${hitText.trim()}」")
-                        status("已选择身份「${acc.name}」…")
-                        retry(); return
-                    }
-                }
-
-                // c) 目标身份不在当前 QQ 账号下 → 切换账号
-                if (!autoPicked && acc.name.isNotBlank() && cool > 1500) {
-                    val hitText = Nodes.clickByTextAllWindows(Ui.SWITCH_ACCOUNT.keys)
-                    if (hitText != null) {
-                        autoTappedAt = System.currentTimeMillis()
-                        IO.log(ctx, TAG, "节点点击 切换账号")
-                        status("切换到账号「${acc.name}」…")
-                        retry(); return
-                    }
-                }
-
-                // d)+e) 授权页一/二都只有「同意」；2.5s 冷却防页面切换动画期间连点
-                if (cool > 2500) {
-                    val hitText = Nodes.clickByTextAllWindows(Ui.AGREE_ANY.keys)
-                    if (hitText != null) {
-                        autoTappedAt = System.currentTimeMillis()
-                        IO.log(ctx, TAG, "节点点击 同意QQ授权")
-                        status("已同意 QQ 授权，等待下一次确认…")
-                        retry(); return
-                    }
-                }
-                retry(); return
+            onQqWindow(ctx, acc, bmp, w, h, lines, status, { retry() }) { msg ->
+                finishAuto(ctx, acc, msg, done)
             }
-
-            // ---- 控件树拿不到（权限/窗口不可见）时的 OCR 兜底 ----
-            fun inBounds(l: Ocr.ScanLine) =
-                l.box.left >= 0 && l.box.top >= 0 && l.box.right <= w && l.box.bottom <= h
-
-            // 悬浮窗提示（正在登录「xx」…/切换到账号「xx」…）会飘在 QQ 小窗上被 OCR 读到，
-            // 这些行绝不可能是真实按钮/列表行，全部排除
-            fun isOverlayJunk(t: String) =
-                t.contains("切换") || t.contains("登录") || t.contains("同步") ||
-                    t.contains("…") || t.contains("..") || t.contains("「")
-
-            // 切号列表页：只看标题/「添加账号」按钮。
-            // 不能用「行内有没有 9 位以上数字」判断 —— 授权页底部的版权行
-            // 「批准文号...ISBN...粤网文20176138」里就有长数字，会误判成列表页
-            val pickerPage = Ui.has(lines, Ui.PICKER_PAGE)
-
-            if (pickerPage) {
-                // a) 按 QQ 昵称优先、其次游戏昵称匹配账号行
-                val key = if (acc.qqNick.isNotBlank()) acc.qqNick else acc.name
-                val target = lines.asSequence()
-                    .filter { key.isNotBlank() && it.text.replace(Regex("\\s+"), "").contains(key) }
-                    .filter { inBounds(it) && !isOverlayJunk(it.text.replace(Regex("\\s+"), "")) }
-                    .filter { !it.text.contains("添加") && !it.text.contains("取消") }
-                    .maxByOrNull { it.box.centerY() }
-                // b) 新账号还不知道 QQ 昵称：跳过已被其他账号占用的号，选列表里第一个没用过的
-                val fallback = if (target == null && key.isBlank() && excludeQq.isNotEmpty()) {
-                    val title = lines.firstOrNull { Ui.matches(it.text, Ui.PICKER_TITLE) }
-                    lines.asSequence()
-                        .filter { isPickerRow(it.text) && !usedQq(it.text) && inBounds(it) }
-                        .filter { l ->
-                            (title == null || l.box.centerY() > title.box.bottom) &&
-                                l.box.centerX() in (w * 0.1f).toInt()..(w * 0.9f).toInt()
-                        }
-                        .minByOrNull { it.box.top }
-                } else null
-                val picked = target ?: fallback
-                if (picked != null && System.currentTimeMillis() - autoTappedAt > 1200) {
-                    autoTappedAt = System.currentTimeMillis()
-                    autoPickedText = picked.text.replace(Regex("\\s+"), "")
-                    tapLine(
-                        ctx, picked,
-                        if (target != null) "选择QQ账号 ${acc.qqNick.ifBlank { acc.name }}"
-                        else "选择下一个 QQ账号（跳过 $excludeQq）"
-                    )
-                    autoSwitched = true
-                    autoPicked = true
-                    status("已选择 QQ 账号「${picked.text.trim()}」，等待授权页…")
-                    retry()
-                    return
-                }
-                retry()
-                return
-            }
-
-            val switchBtn = hit(Ui.SWITCH_ACCOUNT)
-            val reject = hit(Ui.REJECT)
-            val agree = hit(Ui.AGREE_BTN)
-
-            // b) 授权页一「你可以使用不同的头像/昵称登录」：整页身份列表
-            //    （抓全量昵称、点目标行、核验对勾），识别不到列表再走下面的老逻辑
-            val step = handleIdentityPage(ctx, acc, bmp, w, h, lines, status) { row ->
-                tapLine(ctx, Ocr.ScanLine(row.name, row.box), "选择身份 ${row.name}")
-            }
-            if (step.page) {
-                retry(step.acc)
-                return
-            }
-
-            // c) 授权页一（有「切换账号」无「拒绝」）：先点目标游戏身份行选中
-            if (switchBtn != null && reject == null && !autoIdentityPicked && acc.name.isNotBlank()) {
-                fun identityTextOk(p: String) = p == acc.name || (
-                    p.contains(acc.name) && p != "同意" && p != "取消" && p != "创建" &&
-                        !isOverlayJunk(p) && !p.contains("申请") && !p.contains("头像") &&
-                        !p.contains("添加")
-                    )
-                val identity = lines.asSequence()
-                    .filter { identityTextOk(it.text.replace(Regex("\\s+"), "")) }
-                    .filter { inBounds(it) }
-                    .firstOrNull()
-                if (identity != null && System.currentTimeMillis() - autoTappedAt > 1200) {
-                    autoTappedAt = System.currentTimeMillis()
-                    autoIdentityPicked = true
-                    tapLine(ctx, identity, "选择身份 ${acc.name}")
-                    status("已选择身份「${acc.name}」…")
-                    retry()
-                    return
-                }
-                if (identity == null) {
-                    // 整帧 OCR 常漏掉小窗里的身份行（如「小号」）：把提示行与「同意」
-                    // 按钮之间的身份列表区域裁出来放大补识别
-                    zoomFindIdentity(ctx, bmp, w, h, lines, acc) { pt ->
-                        if (pt != null && System.currentTimeMillis() - autoTappedAt > 1200) {
-                            autoTappedAt = System.currentTimeMillis()
-                            autoIdentityPicked = true
-                            identityZoomFails = 0
-                            IO.log(ctx, TAG, "点击 身份(补识别) ${acc.name} (${pt.first},${pt.second})")
-                            BotService.tap(pt.first, pt.second)
-                            status("已选择身份「${acc.name}」…")
-                        } else if (pt == null) {
-                            identityZoomFails++
-                            if (identityZoomFails >= 3) {
-                                IO.log(ctx, TAG, "身份行补识别连续 $identityZoomFails 轮未命中，放弃选身份直接同意")
-                                autoIdentityPicked = true
-                            }
-                        }
-                        retry()
-                    }
-                    return
-                }
-            }
-
-            // 授权页一带「切换账号」且身份行没匹配到 → 目标身份可能属于另一个 QQ 账号，
-            // 先切换账号（列表页由上面的 pickerPage 分支处理）
-            if (switchBtn != null && !autoPicked && acc.name.isNotBlank()) {
-                if (System.currentTimeMillis() - autoTappedAt > 1500) {
-                    autoTappedAt = System.currentTimeMillis()
-                    tapLine(ctx, switchBtn, "切换账号")
-                    status("切换到账号「${acc.name}」…")
-                }
-                retry()
-                return
-            }
-
-            // c)+d) 授权页一/二的按钮都是「同意」，直接点；
-            //       靠 2.5s 冷却防止页面切换动画期间连点两次。
-            if (agree != null && inBounds(agree) && System.currentTimeMillis() - autoTappedAt > 2500) {
-                autoTappedAt = System.currentTimeMillis()
-                tapLine(ctx, agree, "同意QQ授权")
-                status("已同意 QQ 授权，等待下一次确认…")
-                retry()
-                return
-            }
-            retry()
             return
         }
 
@@ -738,62 +409,521 @@ object LoginFlow {
         retry()
     }
 
+    // ------------------------------------------------------------------
+    // QQ 授权窗口：先清点、后登录
+    //   QQ 小窗只有两种页面：切号列表（选择要登录的账号）和身份列表
+    //   （你可以使用不同的头像/昵称登录）。切号列表是目录入口，身份列表是该号的内容。
+    //   清点阶段只翻列表、不点同意；全部记完后才回到目标 QQ 选身份登录。
+    // ------------------------------------------------------------------
+
+    private fun onQqWindow(
+        ctx: Context,
+        acc: Account,
+        bmp: android.graphics.Bitmap,
+        w: Int,
+        h: Int,
+        ocrLines: List<Ocr.ScanLine>,
+        status: (String) -> Unit,
+        retry: () -> Unit,
+        fail: (String) -> Unit,
+    ) {
+        // QQ 还是小窗时昵称列太窄、显示不全：先下滑窗口底部白条把它拉成全屏再读
+        if (maybeExpandQqWindow(ctx, bmp, w, h, status)) { retry(); return }
+
+        // QQ 授权小窗是标准原生控件，优先用控件树；读不到再用 OCR 兜底
+        val winText = Nodes.allWindowsText()
+        val lines = Nodes.allWindowsLines()
+            .map { Ocr.ScanLine(it.first, it.second) }
+            .ifEmpty { ocrLines }
+        if (winText.isBlank() && lines.isEmpty()) { retry(); return }
+        val cool = System.currentTimeMillis() - autoTappedAt
+
+        val inPicker = Ui.inText(winText, Ui.PICKER_PAGE) ||
+            lines.any { Ui.matches(it.text, Ui.PICKER_TITLE) }
+        if (inPicker) {
+            onQqPicker(ctx, acc, w, h, lines, cool, status, retry, fail)
+            return
+        }
+        val inIdentity = Ui.inText(winText, Ui.IDENTITY_PAGE) ||
+            Ui.inText(winText, Ui.IDENTITY_SUBTITLE) ||
+            lines.any { SUBTITLE_RE.containsMatchIn(plainText(it.text)) }
+        if (inIdentity) {
+            onQqIdentity(ctx, acc, bmp, w, h, lines, cool, status, retry, fail)
+            return
+        }
+
+        // 授权页二「QQ 申请使用 你在王者荣耀的以下信息」：授权页一同意过之后才点
+        if (qqAgreedAt > 0L && cool > 2500) {
+            if (Nodes.clickByTextAllWindows(Ui.AGREE_ANY.keys) != null) {
+                autoTappedAt = System.currentTimeMillis()
+                qqAgreedAt = System.currentTimeMillis()
+                IO.log(ctx, TAG, "节点点击 同意QQ授权（读取社交信息）")
+                status("已同意 QQ 授权，等待进入游戏…")
+            }
+        }
+        retry()
+    }
+
     /**
-     * 大厅收尾：
-     *  - 从右上角读真实昵称（微信/新账号第一次同步时回写 name，修掉「平板微信」这类占位名）；
-     *  - **先比登录方式，再比昵称**：大厅区服行前缀（微信xxx区 / 手Qxxx区）体现当前会话类型，
-     *    目标 QQ 却停在微信大厅时一律「退出」重登（微信客户端只能同时登一个号，
-     *    绝不能把微信的昵称和区服直接灌进 QQ 账号）；
-     *  - 账号名还空着的新账号只按登录方式判断，不因为「目标名为空」就当成匹配；
-     *  - 点「换区」同步「我的服务器」全部区服，连同昵称一起回给调用方持久化。
+     * QQ 授权窗还是小窗时，切号列表的昵称列太窄会被截断。小窗底部有条灰色白条，
+     * 从白条上向下滑（系统「小窗全屏」手势）就能把它拉成全屏。
+     * 白条位置用像素在窗口底部一带扫出来（和公告 ✕ 的白色簇同一套思路），不写死坐标。
+     *
+     * 返回 true = 本帧只做这一件事（发了手势/等动画），调用方直接等下一帧。
+     * 已经是全屏、窗口读不到、或连续失败 3 次则返回 false，按小窗原样继续登录。
      */
-    /**
-     * 授权页一身份列表的局部放大补识别：MIUI 自由小窗里身份行字号小，整帧 OCR
-     * 常漏掉目标行。裁「你可以使用不同的头像/昵称登录」提示行与「同意」按钮之间
-     * 的区域放大 3 倍再识别，命中则返回屏幕坐标。
-     */
-    private fun zoomFindIdentity(
+    private fun maybeExpandQqWindow(
+        ctx: Context,
+        bmp: android.graphics.Bitmap,
+        w: Int,
+        h: Int,
+        status: (String) -> Unit,
+    ): Boolean {
+        val win = BotService.windowBoundsOf(QQ_PKG) ?: return false
+        // 铺满屏幕（或接近）＝已经是全屏，不用折腾
+        if (win.width() >= w * 0.9f && win.height() >= h * 0.9f) return false
+        if (qqExpandTries >= 3) return false
+        val now = System.currentTimeMillis()
+        if (qqExpandAt > 0 && now - qqExpandAt < 2500) return true   // 手势刚发出去，等动画落地
+
+        // 在窗口底部 10% 一带逐行数灰白像素（白条是灰胶囊，横向很长）
+        val bandTop = (win.bottom - win.height() * 0.10f).toInt().coerceAtLeast(win.top)
+        var barY = -1
+        var barX = -1
+        var bestHit = 0
+        for (y in bandTop until win.bottom) {
+            var left = -1
+            var right = -1
+            var n = 0
+            var x = win.left
+            while (x < win.right) {
+                val c = bmp.getPixel(x, y)
+                val r = (c shr 16) and 0xFF
+                val g = (c shr 8) and 0xFF
+                val b = c and 0xFF
+                if (kotlin.math.abs(r - g) < 22 && kotlin.math.abs(g - b) < 22 && r in 70..200) {
+                    if (left < 0) left = x
+                    right = x
+                    n++
+                }
+                x += 3
+            }
+            // 白条横向占窗口宽度 15% 以上才算数，单颗噪点不算
+            if (n > bestHit && n * 3 >= win.width() * 0.15f) {
+                bestHit = n
+                barY = y
+                barX = (left + right) / 2
+            }
+        }
+        qqExpandTries++
+        qqExpandAt = now
+        if (barY < 0) {
+            IO.log(ctx, TAG, "小窗白条没扫到（窗口=$win），第 $qqExpandTries 次")
+            return qqExpandTries < 3   // 还有次数就等下一帧再试扫，3 次后按小窗继续
+        }
+        val fromY = barY
+        val toY = (barY + h * 0.12f).toInt().coerceAtMost(h - 4)
+        IO.log(ctx, TAG, "小窗拉全屏：白条($barX,$barY) 下滑到 $toY（窗口=$win 第 $qqExpandTries 次）")
+        status("正在展开 QQ 小窗…")
+        BotService.swipe(barX, fromY, barX, toY, 350)
+        return true
+    }
+
+    /** 切号列表：先把所有 QQ 号记下来，再逐个点开清点身份，最后点目标 QQ */
+    private fun onQqPicker(
+        ctx: Context,
+        acc: Account,
+        w: Int,
+        h: Int,
+        lines: List<Ocr.ScanLine>,
+        cool: Long,
+        status: (String) -> Unit,
+        retry: () -> Unit,
+        fail: (String) -> Unit,
+    ) {
+        val rows = parsePickerRows(lines, w, h)
+        mergePickerRows(rows)
+        if (rows.isNotEmpty()) {
+            IO.log(ctx, TAG, "切号列表=${rows.joinToString { "${it.nick}(${it.no})" }} 已清点=${qqCatalog.keys}")
+        }
+
+        if (qqMode == QqMode.SCAN) {
+            // 1) 还有没清点的 QQ 号 → 依次点开
+            val unscanned = qqSlots.filter { qqCatalog[it.nick] == null }
+            if (unscanned.isNotEmpty()) {
+                if (qqWaitNick != null) { retry(); return }   // 上一次点击还在切页
+                val next = unscanned.first()
+                if (cool > 1200) {
+                    autoTappedAt = System.currentTimeMillis()
+                    qqWaitNick = next.nick
+                    qqSwitchTries = 0
+                    resetIdentScan()
+                    IO.log(ctx, TAG, "点开 QQ「${next.nick}(${next.no})」记录身份")
+                    status("正在记录 QQ「${next.nick}」的登录身份…")
+                    BotService.tap(next.box.centerX(), next.box.centerY())
+                }
+                retry(); return
+            }
+            // 2) 当前一屏都清点完了：账号多于一屏时向下翻一次继续找
+            if (!qqPickerScrolled) {
+                qqPickerScrolled = true
+                qqPickerMark = qqSlots.size
+                scrollPicker(lines, h, true)
+                IO.log(ctx, TAG, "切号列表向下翻（已记录 ${qqSlots.size} 个 QQ）")
+                retry(); return
+            }
+            if (qqSlots.size > qqPickerMark) { qqPickerScrolled = false; retry(); return }
+            // 3) 清点完成 → 按目录算目标 QQ 与身份
+            qqMode = QqMode.TARGET
+            if (!resolveQqTarget(ctx, acc)) {
+                fail(
+                    if (acc.name.isBlank()) "没找到可用的 QQ 登录身份，请先在 QQ 里创建"
+                    else "没有在任何 QQ 账号下找到登录身份「${acc.name}」，请检查账号名"
+                )
+                return
+            }
+            // 目录已经完整：把除目标 QQ 外的其它号交给上层补成账号卡片
+            notifyDiscovered(ctx)
+            retry(); return
+        }
+
+        // TARGET：在列表里点目标 QQ
+        val target = qqTarget ?: run { fail("没读到 QQ 账号列表，请重试"); return }
+        val row = rows.firstOrNull { it.nick == target.nick }
+        if (row == null) {
+            if (qqPickerFindScrolls < 4 && cool > 900) {
+                qqPickerFindScrolls++
+                autoTappedAt = System.currentTimeMillis()
+                if (qqPickerFindScrolls == 3) qqPickerFindForward = false
+                scrollPicker(lines, h, qqPickerFindForward)
+                IO.log(ctx, TAG, "切号列表找目标「${target.nick}」翻页 $qqPickerFindScrolls（forward=$qqPickerFindForward）")
+            }
+            retry(); return
+        }
+        if (cool > 1200) {
+            autoTappedAt = System.currentTimeMillis()
+            qqWaitNick = target.nick
+            qqSwitchTries = 0
+            resetQqFind()
+            autoPickedText = target.nick
+            IO.log(ctx, TAG, "点开目标 QQ「${target.nick}(${target.no})」的身份「$qqTargetIdent」")
+            status("登录 QQ「${target.nick}」的身份「$qqTargetIdent」…")
+            BotService.tap(row.box.centerX(), row.box.centerY())
+        }
+        retry()
+    }
+
+    /** 身份列表：清点阶段抓全身份后回列表；登录阶段选目标身份并同意 */
+    private fun onQqIdentity(
+        ctx: Context,
+        acc: Account,
+        bmp: android.graphics.Bitmap,
+        w: Int,
+        h: Int,
+        lines: List<Ocr.ScanLine>,
+        cool: Long,
+        status: (String) -> Unit,
+        retry: () -> Unit,
+        fail: (String) -> Unit,
+    ) {
+        // 已经点过同意：这一页正在切到授权页二，等它自己走
+        if (qqAgreedAt > 0L) { retry(); return }
+
+        val owner = qqWaitNick
+        if (owner == null) {
+            // 刚进 QQ 窗口时停在「上次登录的号」上：先回切号列表从头清点，绝不在这一页点同意
+            if (cool > 1200) {
+                clickSwitch(ctx, "进入 QQ 窗口先清点")
+                status("打开 QQ 账号列表…")
+            }
+            retry(); return
+        }
+
+        val rows = parseIdentityRows(lines, w, h)
+        if (rows.isEmpty()) { retry(); return }
+
+        // 核对这一页确实是刚点的那个 QQ（原始身份名就是 QQ 昵称）
+        val orig = rows.firstOrNull { it.original }?.name?.let(::plainText)
+        if (qqSwitchTries < 2 && !orig.isNullOrEmpty() && orig != plainText(owner)) {
+            qqSwitchTries++
+            IO.log(ctx, TAG, "身份页属于「$orig」而不是「$owner」，回列表重选（第 $qqSwitchTries 次）")
+            if (cool > 1200) clickSwitch(ctx, "页面不对")
+            retry(); return
+        }
+        qqSwitchTries = 0
+
+        if (qqMode == QqMode.SCAN) {
+            if (!scanIdentityPage(ctx, rows, cool, status)) { retry(); return }
+            val ids = identityNames()
+            qqCatalog[owner] = ids
+            IO.log(ctx, TAG, "QQ「$owner」下 ${ids.size} 个身份：$ids")
+            status("已记录 QQ「$owner」的 ${ids.size} 个身份")
+            qqWaitNick = null
+            resetIdentScan()
+            if (cool > 900) clickSwitch(ctx, "清点下一个 QQ")
+            retry(); return
+        }
+
+        pickTargetIdentity(ctx, bmp, w, h, lines, rows, cool, status, retry, fail)
+    }
+
+    private fun clickSwitch(ctx: Context, why: String) {
+        autoTappedAt = System.currentTimeMillis()
+        val hit = Nodes.clickByTextAllWindows(Ui.SWITCH_ACCOUNT.keys)
+        IO.log(ctx, TAG, "点击 切换账号（$why）-> ${hit ?: "未命中"}")
+    }
+
+    /** 翻动切号列表。只用无障碍滚动：手势会被 QQ 当成拖拽，把授权弹窗拖掉 */
+    private fun scrollPicker(lines: List<Ocr.ScanLine>, h: Int, forward: Boolean) {
+        val title = lines.firstOrNull { Ui.matches(it.text, Ui.PICKER_TITLE) }
+        val top = title?.box?.bottom ?: (h * 0.5f).toInt()
+        Nodes.scrollAllWindows(forward, top, h)
+    }
+
+    /** 扫当前身份页：返回 true 表示已翻到底（或翻不动），可以收工 */
+    private fun scanIdentityPage(
+        ctx: Context,
+        rows: List<IdentityRow>,
+        cool: Long,
+        status: (String) -> Unit,
+    ): Boolean {
+        rows.firstOrNull { it.original }?.let { if (identOrig.isBlank()) identOrig = it.name }
+        val before = identSeen.size
+        rows.forEach { identSeen.add(it.name) }
+        val visible = rows.map { it.name }
+        if (identPending) {
+            identPending = false
+            if (visible.toSet() == identLastVisible.toSet() && identSeen.size == before) identIdle++
+            else if (identSeen.size > before) identIdle = 0
+        }
+        identLastVisible = visible
+
+        if (identIdle >= 2 || identScrolls >= IDENTITY_MAX_SCROLLS) return true
+        if (cool > 900) {
+            autoTappedAt = System.currentTimeMillis()
+            identScrolls++
+            identPending = true
+            Nodes.scrollAllWindows(true, rows.first().box.top, rows.last().box.bottom)
+            status("正在查看该 QQ 的全部登录身份…（已发现 ${identSeen.size} 个）")
+        }
+        return false
+    }
+
+    /** 已扫到的身份，原始身份固定排第一（和账号卡片的下拉顺序一致） */
+    private fun identityNames(): List<String> {
+        val out = ArrayList<String>(identSeen.size + 1)
+        if (identOrig.isNotBlank()) out += identOrig
+        identSeen.filterTo(out) { plainText(it) != plainText(identOrig) }
+        return out
+    }
+
+    /** 登录阶段：选中目标身份 → 核对对勾 → 同意 */
+    private fun pickTargetIdentity(
         ctx: Context,
         bmp: android.graphics.Bitmap,
         w: Int,
         h: Int,
         lines: List<Ocr.ScanLine>,
-        acc: Account,
-        cb: (Pair<Int, Int>?) -> Unit,
+        rows: List<IdentityRow>,
+        cool: Long,
+        status: (String) -> Unit,
+        retry: () -> Unit,
+        fail: (String) -> Unit,
     ) {
-        fun plain(l: Ocr.ScanLine) = l.text.replace(Regex("\\s+"), "")
-        val hint = Ui.line(lines, Ui.IDENTITY_PAGE) ?: Ui.line(lines, Ui.CREATE_IDENTITY)
-        val agree = Ui.line(lines, Ui.AGREE_BTN)
-        if (hint == null || agree == null || agree.box.top <= hint.box.bottom) {
-            cb(null); return
+        val want = plainText(qqTargetIdent)
+        val target = rows.firstOrNull { plainText(it.name) == want }
+        if (target == null) {
+            // 目标身份被挤出小窗：上下翻页找，两个方向都翻不动才算真的没有
+            if (cool > 900 && qqFindScrolls < IDENTITY_MAX_SCROLLS + IDENTITY_MAX_UP_SCROLLS) {
+                val visible = rows.map { it.name }
+                if (qqFindLastVisible.isNotEmpty() && visible.toSet() == qqFindLastVisible.toSet()) {
+                    qqFindSame++
+                } else {
+                    qqFindSame = 0
+                }
+                qqFindLastVisible = visible
+                if (qqFindSame >= 2) {
+                    qqFindSame = 0
+                    qqFindForward = !qqFindForward
+                    qqFindFlips++
+                    if (qqFindFlips >= 2) {
+                        fail("QQ「${qqWaitNick ?: "?"}」下没有登录身份「$qqTargetIdent」")
+                        return
+                    }
+                }
+                qqFindScrolls++
+                autoTappedAt = System.currentTimeMillis()
+                Nodes.scrollAllWindows(qqFindForward, rows.first().box.top, rows.last().box.bottom)
+                status("在 QQ 里查找身份「$qqTargetIdent」…")
+            }
+            retry(); return
         }
-        val left = (hint.box.left - 40).coerceAtLeast(0)
-        val top = (hint.box.bottom + 8).coerceIn(0, h - 1)
-        val bottom = (agree.box.top - 8).coerceAtLeast(top + 30).coerceAtMost(h)
-        val crop = runCatching {
-            android.graphics.Bitmap.createBitmap(bmp, left, top, w - left, bottom - top)
-        }.getOrNull()
-        if (crop == null) { cb(null); return }
-        val scale = 3f
-        Ocr.recognize(crop, scale) { cropLines ->
-            crop.recycle()
-            IO.log(ctx, TAG, "身份区补识别=${cropLines.map { it.text }}")
-            val target = cropLines.asSequence()
-                .filter { it.text.replace(Regex("\\s+"), "").contains(acc.name) }
-                .firstOrNull()
-            if (target == null) { cb(null); return@recognize }
-            val sx = (target.box.centerX() / scale + left).toInt()
-            val sy = (target.box.centerY() / scale + top).toInt()
-            cb(sx to sy)
+
+        val agree = Ui.line(lines, Ui.AGREE_BTN)
+        val panelRight = agree?.box?.right ?: (w * 0.92f).toInt()
+        val tick = rows.firstOrNull { tickOnRow(bmp, it, panelRight) }
+
+        if (!qqPickedIdentity) {
+            if (tick?.name == target.name) {
+                qqPickedIdentity = true
+                IO.log(ctx, TAG, "身份「${target.name}」已是当前选中项")
+            } else if (cool > 1200) {
+                autoTappedAt = System.currentTimeMillis()
+                qqPickedIdentity = true
+                qqIdentityRetaps = 0
+                IO.log(ctx, TAG, "点击 身份「${target.name}」(${target.box.centerX()},${target.box.centerY()})")
+                BotService.tap(target.box.centerX(), target.box.centerY())
+                status("已选择身份「${target.name}」…")
+            }
+            retry(); return
+        }
+
+        if (qqIdentityRetaps < 2 && tick != null && tick.name != target.name && cool > 1500) {
+            qqIdentityRetaps++
+            autoTappedAt = System.currentTimeMillis()
+            IO.log(ctx, TAG, "对勾在「${tick.name}」而非「${target.name}」，重新点选（第 $qqIdentityRetaps 次）")
+            BotService.tap(target.box.centerX(), target.box.centerY())
+            retry(); return
+        }
+
+        if (cool > 2500) {
+            autoTappedAt = System.currentTimeMillis()
+            var hit = Nodes.clickByTextAllWindows(Ui.AGREE_ANY.keys)
+            if (hit == null && agree != null) {
+                BotService.tap(agree.box.centerX(), agree.box.centerY())
+                hit = "coord"
+            }
+            IO.log(ctx, TAG, "点击 同意QQ授权（身份「${target.name}」）-> ${hit ?: "未命中"}")
+            if (hit != null) {
+                qqAgreedAt = System.currentTimeMillis()
+                status("已同意 QQ 授权，正在登录「$qqTargetIdent」…")
+            } else {
+                status("没找到「同意」按钮，请检查 QQ 授权窗口")
+            }
+        }
+        retry()
+    }
+
+    /** 按清点目录定目标 QQ 与身份：优先目标身份名 → 其次没被其他账号占用的身份 */
+    private fun resolveQqTarget(ctx: Context, acc: Account): Boolean {
+        val want = plainText(acc.name)
+        val wantNick = plainText(acc.qqNick)
+        if (want.isNotEmpty()) {
+            val owners = qqSlots.filter { s ->
+                qqCatalog[s.nick]?.any { plainText(it) == want } == true
+            }
+            if (owners.isEmpty()) {
+                IO.log(ctx, TAG, "目录里没有身份「$want」：$qqCatalog")
+                return false
+            }
+            val slot = owners.firstOrNull { wantNick.isNotEmpty() && plainText(it.nick) == wantNick }
+                ?: owners.first()
+            qqTarget = slot
+            qqTargetIdent = qqCatalog[slot.nick]!!.first { plainText(it) == want }
+            autoPickedText = slot.nick
+            IO.log(ctx, TAG, "目标身份「$want」→ QQ「${slot.nick}(${slot.no})」 目录=$qqCatalog")
+            return true
+        }
+        for (s in qqSlots) {
+            val free = qqCatalog[s.nick]?.firstOrNull { plainText(it) !in excludeQq } ?: continue
+            qqTarget = s
+            qqTargetIdent = free
+            autoPickedText = s.nick
+            IO.log(ctx, TAG, "新账号 → QQ「${s.nick}(${s.no})」的身份「$free」 排除=$excludeQq")
+            return true
+        }
+        return false
+    }
+
+    /**
+     * 清点目录里除目标 QQ 外的其它号 → 每个号一张账号卡（身份放 identities，右侧下拉切换）。
+     * 只上报一次：上层合并卡片写盘，并把这些号追加进执行队列。
+     */
+    private fun notifyDiscovered(ctx: Context) {
+        val cb = discoveredCb ?: return
+        discoveredCb = null
+        val targetNick = qqTarget?.nick.orEmpty()
+        val found = ArrayList<Account>()
+        for (s in qqSlots) {
+            if (s.nick == targetNick) continue
+            val ids = qqCatalog[s.nick]?.takeIf { it.isNotEmpty() } ?: continue
+            // 默认登录身份：优先没被其它账号占用的那个，原始身份（第一个）兜底
+            val pick = ids.firstOrNull { plainText(it) !in excludeQq } ?: ids.first()
+            found += Account(
+                name = pick,
+                qqNick = s.nick,
+                qqNo = s.no,
+                loginType = LoginType.QQ,
+                identities = ids,
+            )
+        }
+        if (found.isEmpty()) return
+        IO.log(
+            ctx, TAG,
+            "清点到的其它 QQ 账号=${found.joinToString { "${it.qqNick}->${it.identities}" }}"
+        )
+        cb(found)
+    }
+
+    private val QQNO_RE = Regex("^\\d{5,12}$")
+    /** 「昵称 12345678」这种昵称与 QQ 号被 OCR 拼成一行的情况 */
+    private val QQNO_TAIL_RE = Regex("^(.+?)[\\s·:：]+(\\d{5,12})$")
+
+    /** 解析「选择要登录的账号」列表：QQ 昵称 + QQ 号（小窗里是上下两行） */
+    private fun parsePickerRows(lines: List<Ocr.ScanLine>, w: Int, h: Int): List<QqSlot> {
+        fun inBounds(l: Ocr.ScanLine) =
+            l.box.left >= 0 && l.box.top >= 0 && l.box.right <= w && l.box.bottom <= h
+        val page = lines.filter { inBounds(it) }
+        val title = page.firstOrNull { Ui.matches(it.text, Ui.PICKER_TITLE) } ?: return emptyList()
+        val area = page.filter { it.box.centerY() > title.box.bottom }.sortedBy { it.box.top }
+
+        // a) 昵称和 QQ 号在同一行
+        val inline = ArrayList<QqSlot>()
+        for (l in area) {
+            val m = QQNO_TAIL_RE.find(plainText(l.text)) ?: continue
+            val nick = m.groupValues[1].trim()
+            if (nick.isNotEmpty() && !isPickerJunk(nick)) inline += QqSlot(nick, m.groupValues[2], l.box)
+        }
+        if (inline.isNotEmpty()) return inline
+
+        // b) 昵称一行、QQ 号一行（QQ 小窗的真实结构）
+        val out = ArrayList<QqSlot>()
+        for (n in area.filter { QQNO_RE.matches(plainText(it.text)) }) {
+            val no = plainText(n.text)
+            val nick = area
+                .filter { it !== n && !QQNO_RE.matches(plainText(it.text)) }
+                .filter { !isPickerJunk(plainText(it.text)) }
+                .filter { overlapX(it.box, n.box) }
+                .filter { it.box.bottom <= n.box.top + n.box.height() / 2 }
+                .maxByOrNull { it.box.bottom }
+                ?: continue
+            out += QqSlot(plainText(nick.text), no, nick.box)
+        }
+        return out
+    }
+
+    private fun mergePickerRows(rows: List<QqSlot>) {
+        for (r in rows) {
+            val same = qqSlots.firstOrNull {
+                if (r.no.isNotEmpty() && it.no.isNotEmpty()) it.no == r.no else it.nick == r.nick
+            }
+            if (same == null) {
+                qqSlots += r
+            } else if (same.no.isEmpty() && r.no.isNotEmpty()) {
+                qqSlots[qqSlots.indexOf(same)] = same.copy(no = r.no, box = r.box)
+            }
         }
     }
 
-    // ------------------------------------------------------------------
-    // QQ 授权页一「你可以使用不同的头像/昵称登录」：平铺的身份列表
-    //   第 1 行是 QQ 原始身份（下方带「QQ头像昵称」副标题），后面是「创建」的分身，
-    //   当前被提交的那行右侧有一个蓝色对勾。老逻辑只 OCR 默认显示的分身当账号名，
-    //   所以这里要把整页列表抓全并写回账号（identities + qqNick）。
-    // ------------------------------------------------------------------
+    /** 切号列表里不可能是账号名的行（标题、按钮、状态栏时间等） */
+    private fun isPickerJunk(s: String): Boolean {
+        if (s.isBlank() || s.length > 24) return true
+        val junk = listOf(
+            "选择要登录", "添加账号", "切换账号", "切换帐号", "取消", "删除", "返回", "关闭",
+            "王者荣耀", "同意", "拒绝", "申请使用", "登录", "「", "…", "×",
+        )
+        return junk.any { s.contains(it) } || NOISE_RE.containsMatchIn(s)
+    }
 
     private val WS = Regex("\\s+")
     /** QQ 原始身份行独有的副标题；OCR 常把 QQ 认成 0Q/OQ、昵称认成呢称 */
@@ -812,13 +942,6 @@ object LoginFlow {
     /** 授权页上一行身份：昵称 + 是否 QQ 原始身份 + 昵称文字框 */
     private data class IdentityRow(val name: String, val original: Boolean, val box: Rect)
 
-    private data class IdentityStep(
-        /** 是否停在授权页一（true 时调用方必须 retry 并跳过后续分支） */
-        val page: Boolean,
-        /** 可能已回写 identities / qqNick 的账号 */
-        val acc: Account,
-    )
-
     private fun plainText(t: String) = t.replace(WS, "")
 
     private fun overlapX(a: Rect, b: Rect): Boolean {
@@ -832,23 +955,6 @@ object LoginFlow {
      * 原始身份 = 带「QQ头像昵称」副标题的那行（昵称在副标题正上方，或同一行被 OCR 拼起来）。
      * 其余落在这个区域里的文字行就是创建出来的分身。原始身份固定排第一，和 UI 下拉一致。
      */
-    /** 切号列表页的账号行：排除标题/按钮/悬浮窗提示，避免把「添加账号」之类当号点掉 */
-    private fun isPickerRow(raw: String): Boolean {
-        val s = raw.replace(WS, "")
-        if (s.isEmpty() || s.length > 24) return false
-        val junk = listOf(
-            "选择要登录", "添加账号", "切换账号", "切换帐号", "取消", "返回", "关闭",
-            "王者荣耀", "同意", "拒绝", "申请使用", "登录", "「", "…",
-        )
-        return junk.none { s.contains(it) } && !NOISE_RE.containsMatchIn(s)
-    }
-
-    /** 这一行是不是已被其他账号用掉的 QQ 号 */
-    private fun usedQq(raw: String): Boolean {
-        val s = raw.replace(WS, "")
-        return excludeQq.any { e -> s.contains(e) }
-    }
-
     private fun parseIdentityRows(lines: List<Ocr.ScanLine>, w: Int, h: Int): List<IdentityRow> {
         fun inBounds(l: Ocr.ScanLine) =
             l.box.left >= 0 && l.box.top >= 0 && l.box.right <= w && l.box.bottom <= h
@@ -945,187 +1051,36 @@ object LoginFlow {
     }
 
     /**
-     * 授权页一的完整处理（一轮只做一件事，做完由调用方 retry）：
-     *  1. 抓全量身份列表写回 `acc`（identities + 原始身份写 qqNick）；
-     *  2. 没选过 → 点目标身份行（`acc.name`；为空则点原始身份）；
-     *  3. 选过 → 对勾还停在别的行就再点一次（最多 2 次）；
-     *  4. 对勾落位或无法判断 → 点「同意」。
+     * 公告弹窗右上角的 ✕ 是白色图形，OCR 读不到。在标题行同一水平带、标题右侧扫白色像素簇，
+     * 取簇重心作为点击点。找不到（或像素太少）返回 null，由调用方按比例兜底。
      */
-    private fun handleIdentityPage(
-        ctx: Context,
-        acc: Account,
+    private fun findWhiteCluster(
         bmp: android.graphics.Bitmap,
         w: Int,
         h: Int,
-        lines: List<Ocr.ScanLine>,
-        status: (String) -> Unit,
-        clickRow: (IdentityRow) -> Unit,
-    ): IdentityStep {
-        // 切 QQ 号那一页（「选择要登录的账号」）交给老逻辑按 QQ 昵称点，不能当身份列表解析
-        if (lines.any { Ui.matches(it.text, Ui.PICKER_TITLE) }) return IdentityStep(false, acc)
-        val page = lines.any { Ui.matches(it.text, Ui.IDENTITY_PAGE) } ||
-            lines.any { SUBTITLE_RE.containsMatchIn(plainText(it.text)) }
-        if (!page) return IdentityStep(false, acc)
-
-        val rows = parseIdentityRows(lines, w, h)
-        if (rows.isEmpty()) {
-            // 页面已确认但这一帧没读出行（加载/滚动动画）：等下一帧。
-            // 不能掉回旧逻辑 —— 那里会因为没匹配到身份直接点「切换账号」，把授权页踢掉
-            return IdentityStep(true, acc)
-        }
-
-        val agree = Ui.line(lines, Ui.AGREE_BTN)
-        val switch = Ui.line(lines, Ui.SWITCH_ACCOUNT)
-        val hint = Ui.line(lines, Ui.IDENTITY_PAGE)
-        val listTop = (hint?.box?.bottom ?: (h * 0.18f).toInt()).coerceIn(0, h - 1)
-        val listBottom = (agree?.box?.top ?: (h * 0.78f).toInt()).coerceIn(listTop + 1, h)
-        val panelRight = agree?.box?.right ?: (w * 0.92f).toInt()
-        val tick = rows.firstOrNull { tickOnRow(bmp, it, panelRight) }
-        val cool = System.currentTimeMillis() - autoTappedAt
-
-        // 授权页可能还是上一个 QQ 号（QQ 默认沿用上次登录的账号）。
-        // 判定：原始身份名是别的账号已占用的 QQ 昵称，且本账号的游戏昵称/QQ昵称都不在列表里
-        // → 不抓身份、不写回，直接点「切换账号」换到下一个号，避免把别人的身份写进这个账号。
-        val orig = rows.firstOrNull { it.original }?.name
-        val mineShown = (acc.name.isNotBlank() && rows.any { it.name == acc.name }) ||
-            (acc.qqNick.isNotBlank() && orig != null &&
-                acc.qqNick.replace(WS, "") == orig.replace(WS, ""))
-        // 整页身份里只要有一行属于别的账号（包括该 QQ 号创建的分身，如「OK」），
-        // 就认定当前 QQ 号已被占用 —— 只比原始身份不够，副标题 OCR 漏读时会漏判
-        val takenRows = rows.map { it.name.replace(WS, "") }.filter { excludeQq.contains(it) }
-        val wrongQq = (orig != null && excludeQq.contains(orig.replace(WS, ""))) || takenRows.isNotEmpty()
-        if (wrongQq && !mineShown && !autoSwitched) {
-            if (switch != null && cool > 900) {
-                autoTappedAt = System.currentTimeMillis()
-                tapLine(ctx, switch, "切换账号（当前 QQ「${orig ?: takenRows.first()}」已被占用）")
-                status("切换到另一个 QQ 账号…")
-            }
-            return IdentityStep(true, acc)
-        }
-
-        // 累加本帧看到的身份；原始身份只认带副标题的那行，固定排第一
-        rows.firstOrNull { it.original }?.let {
-            if (identityOrigName.isBlank()) identityOrigName = it.name
-        }
-        val before = identitySeen.size
-        rows.forEach { identitySeen.add(it.name) }
-        // 上一轮翻页核对：可见行没变 = 已经到顶/到底（QQ 授权弹窗不能用手势，翻不动就是到头了）
-        val visibleNow = rows.map { it.name }
-        if (identityScrollPending) {
-            identityScrollPending = false
-            if (visibleNow.toSet() == identityLastVisible.toSet() && identitySeen.size == before &&
-                identityScrollingUp
-            ) {
-                identityUpDone = true
-                IO.log(ctx, TAG, "已回到身份列表顶部")
-            }
-        }
-        identityLastVisible = visibleNow
-        val allNames = ArrayList<String>(identitySeen.size + 1)
-        if (identityOrigName.isNotBlank()) allNames += identityOrigName
-        identitySeen.filterTo(allNames) { it != identityOrigName }
-        val updated = acc.copy(
-            identities = allNames,
-            qqNick = identityOrigName.ifBlank { acc.qqNick },
-        )
-        if (updated.identities != acc.identities || updated.qqNick != acc.qqNick) {
-            IO.log(ctx, TAG, "授权页身份列表=${allNames} 目标=${acc.name} 当前=${tick?.name}")
-        }
-        // 向下翻页却没出现新昵称 → 到底了
-        if (identityScrolls > 0 && !identityScrollingUp && identitySeen.size == before) identityIdleScrolls++ else identityIdleScrolls = 0
-
-        // 1) 先向下翻，把整张列表扫完（一屏只放得下 2 个身份，3~5 个必须翻页）
-        if (!identityScanDone) {
-            if (identityIdleScrolls >= 2 || identityScrolls >= IDENTITY_MAX_SCROLLS) {
-                identityScanDone = true
-                IO.log(ctx, TAG, "身份列表已扫到底，共 ${allNames.size} 个：$allNames")
-            } else if (cool > 900) {
-                autoTappedAt = System.currentTimeMillis()
-                identityScrolls++
-                swipeList(ctx, listTop, listBottom, revealMore = true)
-                status("正在查看全部登录身份…（已发现 ${allNames.size} 个）")
-                return IdentityStep(true, updated)
-            } else {
-                return IdentityStep(true, updated)
-            }
-        }
-
-        // 2) 找目标身份行；目标在上面几屏时往上翻回去
-        var target = rows.firstOrNull {
-            if (acc.name.isNotBlank()) it.name == acc.name
-            else it.original || (identityOrigName.isNotBlank() && it.name == identityOrigName)
-        }
-        // 原始身份的副标题 OCR 没读出来时，列表最上面那行就是原始身份（列表已回顶）
-        if (target == null && acc.name.isBlank() && identityUpDone) target = rows.firstOrNull()
-        if (target == null) {
-            val maybeAbove = acc.name.isBlank() || identitySeen.contains(acc.name)
-            if (maybeAbove && !identityUpDone && cool > 900) {
-                if (identityUpScrolls < IDENTITY_MAX_UP_SCROLLS) {
-                    identityUpScrolls++
-                    autoTappedAt = System.currentTimeMillis()
-                    swipeList(ctx, listTop, listBottom, revealMore = false)
-                    status("回到列表上方找「${acc.name.ifBlank { identityOrigName }}」…")
-                } else {
-                    identityUpDone = true
+        title: Rect,
+    ): Pair<Int, Int>? {
+        val cy = title.centerY()
+        val half = (title.height() * 0.9f).coerceAtLeast(h * 0.02f)
+        val top = (cy - half).toInt().coerceAtLeast(0)
+        val bottom = (cy + half).toInt().coerceAtMost(h - 1)
+        val left = (title.right + w * 0.01f).toInt().coerceIn(0, w - 1)
+        val right = (w * 0.97f).toInt().coerceAtLeast(left + 1)
+        var sx = 0L
+        var sy = 0L
+        var n = 0
+        for (y in top..bottom) {
+            for (x in left until right) {
+                val c = bmp.getPixel(x, y)
+                if (((c shr 16) and 0xFF) > 190 && ((c shr 8) and 0xFF) > 190 && (c and 0xFF) > 190) {
+                    sx += x
+                    sy += y
+                    n++
                 }
-                return IdentityStep(true, updated)
             }
-            // 整张列表都翻过了确实没有目标身份：可能属于另一个 QQ 账号 → 切号
-            if (!maybeAbove && identityUpDone && switch != null && cool > 1500) {
-                autoTappedAt = System.currentTimeMillis()
-                tapLine(ctx, switch, "切换账号")
-                status("切换到账号「${acc.name}」…")
-            }
-            return IdentityStep(true, updated)
         }
-
-        if (!autoIdentityPicked) {
-            if (tick?.name == target.name) {
-                autoIdentityPicked = true
-                identityRetaps = 0
-                IO.log(ctx, TAG, "身份「${target.name}」已是当前项，无需重选")
-                return IdentityStep(true, updated)
-            }
-            if (cool > 1200) {
-                autoTappedAt = System.currentTimeMillis()
-                autoIdentityPicked = true
-                identityRetaps = 0
-                clickRow(target)
-                status("已选择身份「${target.name}」…")
-            }
-            return IdentityStep(true, updated)
-        }
-
-        if (identityRetaps < 2 && tick != null && tick.name != target.name && cool > 1500) {
-            identityRetaps++
-            autoTappedAt = System.currentTimeMillis()
-            clickRow(target)
-            IO.log(ctx, TAG, "对勾在「${tick.name}」而非目标「${target.name}」，重新点选（第 $identityRetaps 次）")
-            return IdentityStep(true, updated)
-        }
-
-        if (agree != null && cool > 2500) {
-            autoTappedAt = System.currentTimeMillis()
-            tapLine(ctx, agree, "同意QQ授权")
-            status("已同意 QQ 授权（身份「${target.name}」）…")
-        }
-        return IdentityStep(true, updated)
-    }
-
-    /**
-     * 翻动身份列表。只用无障碍 ACTION_SCROLL —— QQ 授权弹窗里后台手势会被当成拖拽，
-     * 直接把授权弹窗拖掉（实测日志「您取消了QQ授权」）。
-     * 翻不动就当作已经到顶/到底，由调用方按「没有新昵称」结束扫描。
-     * @param revealMore true=看下面更多身份；false=翻回上面
-     */
-    private fun swipeList(ctx: Context, top: Int, bottom: Int, revealMore: Boolean) {
-        identityScrollingUp = !revealMore
-        identityScrollPending = true
-        val moved = Nodes.scrollAllWindows(revealMore, top, bottom)
-        IO.log(
-            ctx, TAG,
-            "身份列表${if (revealMore) "下翻" else "上翻"}（无障碍滚动${if (moved) "" else "，没有可滚动节点"}）"
-        )
+        if (n < 40) return null
+        return (sx / n).toInt() to (sy / n).toInt()
     }
 
     private fun handleLobby(
@@ -1171,19 +1126,30 @@ object LoginFlow {
 
             if (needSwitch) {
                 logoutAttempts++
-                // 重置 QQ 窗口的选择状态：下次授权重新切 QQ 账号、重新选身份。
-                // 不重置的话会一直停在上一账号的授权页反复点同意，登回同一个身份
-                autoPicked = false
-                autoIdentityPicked = false
+                // 重置 QQ 清点状态：下次授权重新扫切号列表、重新选号，避免停在上一账号反复点同意
+                // （已知 QQ 号 + 身份时保留目标，退出重登后直接选号，不再清点一遍用户名）
+                resetQqFlow(keepTarget = qqMode == QqMode.TARGET)
                 autoPickedText = ""
-                identityZoomFails = 0
-                identityRetaps = 0
-                resetIdentityScan()
                 val exit = Ui.line(lines, Ui.EXIT)
-                if (exit != null) tapLine(ctx, exit, "退出「$name」")
-                else {
-                    IO.log(ctx, TAG, "退出按钮 OCR 未命中，按比例点击 ($EXIT_RX,$EXIT_RY)")
-                    BotService.tap((w * EXIT_RX).toInt(), (h * EXIT_RY).toInt())
+                // 平板 21:9 上下黑边会让比例坐标掉进黑边，而且 OCR 常把「昵称 退出」拼成一行，
+                // 整行相等匹配不上：这种情况退出按钮就在这一行最右端
+                val mergedExit = lines.firstOrNull {
+                    val t = it.text.replace(WS, "")
+                    t != "退出" && t.endsWith("退出")
+                }
+                when {
+                    exit != null -> tapLine(ctx, exit, "退出「$name」")
+                    mergedExit != null -> {
+                        val d = mergedExit.box.height().coerceAtLeast(24)
+                        val x = (mergedExit.box.right - d).coerceIn(0, w - 1)
+                        val y = mergedExit.box.centerY()
+                        IO.log(ctx, TAG, "点击 退出(合并行) ($x,$y) :: ${mergedExit.text}")
+                        BotService.tap(x, y)
+                    }
+                    else -> {
+                        IO.log(ctx, TAG, "退出按钮 OCR 未命中，按比例点击 ($EXIT_RX,$EXIT_RY)")
+                        BotService.tap((w * EXIT_RX).toInt(), (h * EXIT_RY).toInt())
+                    }
                 }
                 status(
                     if (!typeOk) "当前是${if (currentWx) "微信" else "QQ"}登录，退出后改用${if (wantWx) "微信" else "QQ"}登录…"
@@ -1207,25 +1173,43 @@ object LoginFlow {
             }
 
             // 走到这里必然 matched（不匹配的已在上面拦截）
-            val finalName = name.ifBlank { acc.name }
+            // 大厅昵称读不出来（平板上游戏是 21:9 上下黑边，右上角位置会落在识别区外）时，
+            // 用刚登录的游戏身份名兜底：登录的哪个身份，进游戏就是哪个昵称
+            val finalName = name.ifBlank { qqTargetIdent.ifBlank { acc.name } }
             val detected = when {
                 serverLine?.text?.contains("微信") == true -> LoginType.WECHAT
                 serverLine != null -> LoginType.QQ
                 else -> acc.loginType
             }
-            // 登录成功后学习映射：切号列表点中的 QQ 昵称 ≠ 游戏昵称时回写 qqNick，
-            // 下次切号列表就能按 QQ 昵称选对 QQ 账号
-            val learnedNick =
-                if (autoPickedText.isNotBlank() && autoPickedText != finalName && autoPickedText != acc.qqNick)
-                    autoPickedText else acc.qqNick
+            // 登录成功后学习映射：切号列表点中的 QQ 昵称就是目录里的 QQ 号，
+            // 同时把该 QQ 号下清点到的全部身份存回账号（身份下拉框的数据源）
+            val owner = qqTarget?.nick?.takeIf { it.isNotBlank() }
+            val learnedNick = owner ?: if (
+                autoPickedText.isNotBlank() && autoPickedText != finalName && autoPickedText != acc.qqNick
+            ) autoPickedText else acc.qqNick
+            val identities = qqCatalog[owner]?.takeIf { it.isNotEmpty() } ?: acc.identities
             val base = acc.copy(
                 name = finalName,
                 qqNick = learnedNick,
+                // 切号时顺手抓到的 QQ 号，卡里还没有就补上
+                qqNo = acc.qqNo.ifBlank { qqTarget?.no.orEmpty() },
+                identities = identities,
                 // 登录类型以大厅区服前缀为准（如账号标了 QQ 但登进了微信区）
                 loginType = if (matched || acc.loginType == LoginType.WECHAT) detected else acc.loginType,
             )
 
-            val change = Ui.line(lines, Ui.CHANGE_AREA)
+            // 日常执行只负责登录：区服信息由「同步区服」按钮维护好，这里不再开换区面板抓一遍
+            if (!autoSyncFarms) {
+                finishAuto(ctx, base, "已登录「$finalName」", done)
+                return@readNickname
+            }
+
+            // 不能把自己的悬浮提示「查找换区入口..」当成换区按钮：提示文字里也含「换区」，
+            // 大厅首帧渲染慢时它会排在真实按钮前面，点上去等于什么也没点
+            val change = lines.firstOrNull {
+                Ui.matches(it.text, Ui.CHANGE_AREA) &&
+                    !it.text.contains("…") && !it.text.contains("..") && !it.text.contains("查找")
+            }
             if (change != null) {
                 tapLine(ctx, change, "换区")
                 status("登录成功：$finalName，正在同步区服…")
@@ -1259,7 +1243,7 @@ object LoginFlow {
             val keep = if (best.isNotEmpty()) best else acc.farms
             // 超时也要把面板关掉：抓一帧拿屏幕尺寸后点返回
             BotService.capture { b ->
-                if (b != null) tapBack(ctx, b.width, b.height, "同步超时")
+                if (b != null) tapBack(ctx, b.width, b.height, null, "同步超时")
             }
             finishAuto(ctx, acc.copy(farms = keep), "已登录「${acc.name}」· ${keep.size} 个区服", done)
             return
@@ -1276,7 +1260,7 @@ object LoginFlow {
                         val merged = if (all.size > best.size) all else best
                         if (merged.isNotEmpty() && merged.size == best.size) {
                             IO.log(ctx, TAG, "区服同步完成：${merged.size} 个（连续两轮一致）")
-                            tapBack(ctx, bmp.width, bmp.height, "区服同步完成")
+                            tapBack(ctx, bmp.width, bmp.height, lines, "区服同步完成")
                             finishAuto(ctx, acc.copy(farms = merged), "已登录「${acc.name}」· ${merged.size} 个区服", done)
                         } else {
                             if (attempt == 3) {
@@ -1294,9 +1278,35 @@ object LoginFlow {
     }
 
     /** 面板左上角返回箭头：手机/平板同一比例位置（AddAccountFlow 同款） */
-    private fun tapBack(ctx: Context, w: Int, h: Int, why: String) {
+    /**
+     * 从换区面板回大厅。返回箭头是图片没有文字，只能点坐标：
+     * x 用比例（面板宽度随屏幕等比缩放），y 跟着「选择服务器」标题走 ——
+     * 平板上游戏是上下黑边的 21:9，整块 UI 下移，写死 0.067h 会点进黑边。
+     * 游戏不吃系统返回键（实测 KEYCODE_BACK 无效），所以不能改成 back()。
+     */
+    private fun tapBack(
+        ctx: Context,
+        w: Int,
+        h: Int,
+        lines: List<Ocr.ScanLine>?,
+        why: String,
+    ) {
         val x = (w * BACK_RX).toInt()
-        val y = (h * BACK_RY).toInt()
+        // 面板标题 OCR 常把「服务器」读错一个字（如「选择服脹务器」），只认前三个字
+        val title = lines?.firstOrNull { it.text.contains("选择服") }
+        // 标题也没读到时，用左侧「我的服务器 / 推荐服务器」第一行估算标题行（往上约 0.072H）；
+        // 平板 21:9 上下黑边会把 0.067H 的兜底坐标打进黑边，点了等于没点
+        val sidebar = lines
+            ?.filter {
+                (it.text.contains("我的服") || it.text.contains("推荐服")) &&
+                    it.box.left < w * 0.4f
+            }
+            ?.minByOrNull { it.box.top }
+        val y = when {
+            title != null -> title.box.centerY()
+            sidebar != null -> (sidebar.box.top - h * 0.072f).toInt().coerceAtLeast(0)
+            else -> (h * BACK_RY).toInt()
+        }
         IO.log(ctx, TAG, "点击 返回大厅 ($why) ($x,$y)")
         BotService.tap(x, y)
     }

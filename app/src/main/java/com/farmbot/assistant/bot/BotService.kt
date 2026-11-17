@@ -89,6 +89,12 @@ class BotService : AccessibilityService() {
             inst?.rootInActiveWindow
         }.getOrNull()
 
+        /** 某包名窗口在屏幕上的边界；用于判断 QQ 授权窗是小窗还是已铺满全屏 */
+        fun windowBoundsOf(pkg: String): android.graphics.Rect? = runCatching {
+            inst?.windows?.firstOrNull { it.root?.packageName?.toString() == pkg }
+                ?.let { android.graphics.Rect().also { r -> it.getBoundsInScreen(r) } }
+        }.getOrNull()
+
         /** 所有无障碍窗口的根节点（QQ/微信 授权小窗浮在游戏上，不在 rootInActiveWindow 内）。
          *  排除助手自己的悬浮窗，否则进度提示「正在登录「小号」…」会被当成真实按钮/身份行。 */
         fun windowRoots(): List<android.view.accessibility.AccessibilityNodeInfo> = runCatching {

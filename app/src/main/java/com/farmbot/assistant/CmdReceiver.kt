@@ -63,6 +63,12 @@ class CmdReceiver : BroadcastReceiver() {
 
                 "com.farmbot.assistant.CMD_PING" -> IO.log(ctx, TAG, "pong ready=${BotService.isReady}")
 
+                "com.farmbot.assistant.CMD_NODES" -> {
+                    val txt = File(IO.dir(ctx, "debug"), "nodes.txt")
+                    txt.writeText(com.farmbot.assistant.bot.Nodes.allWindowsDump())
+                    IO.log(ctx, TAG, "nodes -> ${txt.absolutePath}")
+                }
+
                 "com.farmbot.assistant.CMD_SCAN" -> {
                     BotService.capture { bmp ->
                         if (bmp == null) {

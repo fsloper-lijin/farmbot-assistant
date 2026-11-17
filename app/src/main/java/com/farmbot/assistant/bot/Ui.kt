@@ -70,8 +70,9 @@ object Ui {
     val EXIT = Item(listOf("退出"), Match.EXACT)
 
     // ---------------- 区域 ----------------
-    /** 大厅右上角昵称：只在右上角这块 OCR，比整屏识别稳，也不会读到状态栏 */
-    val NICKNAME_REGION = Region(0.70f, 0f, 1f, 0.16f)
+    /** 大厅右上角昵称：只在右上角这块 OCR，比整屏识别稳，也不会读到状态栏。
+     *  纵向放宽到 0.26h：平板 21:9 上下黑边把游戏 UI 下移，昵称实测落在 0.183h。 */
+    val NICKNAME_REGION = Region(0.70f, 0f, 1f, 0.26f)
 
     /** 在 OCR 结果里找第一个命中 [item] 的行 */
     fun line(lines: List<Ocr.ScanLine>, item: Item): Ocr.ScanLine? =

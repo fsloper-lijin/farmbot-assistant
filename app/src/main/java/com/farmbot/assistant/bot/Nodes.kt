@@ -183,6 +183,37 @@ object Nodes {
         for (i in 0 until n.childCount) gatherTextNoLimit(n.getChild(i), sb, depth + 1)
     }
 
+    /** 调试用：转储所有窗口的节点（类名/边界/文字/可点/可滚），排查 QQ 小窗的结构 */
+    fun allWindowsDump(): String {
+        val sb = StringBuilder()
+        var index = 0
+        for (root in BotService.windowRoots()) {
+            index++
+            sb.append("== window ").append(index).append(" ==\n")
+            fun walk(n: AccessibilityNodeInfo?, d: Int) {
+                if (n == null || d > 25 || sb.length > 16000) return
+                val t = n.text?.toString()?.trim().orEmpty()
+                val cd = n.contentDescription?.toString()?.trim().orEmpty()
+                if (t.isNotEmpty() || cd.isNotEmpty() || n.isScrollable || n.isClickable) {
+                    val r = android.graphics.Rect()
+                    n.getBoundsInScreen(r)
+                    repeat(d) { sb.append("  ") }
+                    sb.append(n.className?.toString()?.substringAfterLast('.') ?: "?")
+                        .append(" [").append(r.left).append(',').append(r.top).append(',')
+                        .append(r.right).append(',').append(r.bottom).append(']')
+                    if (n.isClickable) sb.append(" click")
+                    if (n.isScrollable) sb.append(" scroll")
+                    if (t.isNotEmpty()) sb.append(" text=").append(t)
+                    if (cd.isNotEmpty()) sb.append(" desc=").append(cd)
+                    sb.append('\n')
+                }
+                for (i in 0 until n.childCount) walk(n.getChild(i), d + 1)
+            }
+            walk(root, 0)
+        }
+        return sb.toString()
+    }
+
     private fun collectClickable(
         n: AccessibilityNodeInfo?,
         out: MutableList<AccessibilityNodeInfo>,

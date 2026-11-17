@@ -5,6 +5,9 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,41 +15,61 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
+import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
+import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridItemSpan
+import androidx.compose.foundation.lazy.staggeredgrid.itemsIndexed as staggeredItemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.farmbot.assistant.data.Account
@@ -54,6 +77,7 @@ import com.farmbot.assistant.data.Farm
 import com.farmbot.assistant.data.LoginType
 import com.farmbot.assistant.ui.theme.Bg
 import com.farmbot.assistant.ui.theme.Cyan
+import com.farmbot.assistant.ui.theme.Danger
 import com.farmbot.assistant.ui.theme.Line
 import com.farmbot.assistant.ui.theme.Purple
 import com.farmbot.assistant.ui.theme.Surface1
@@ -61,32 +85,41 @@ import com.farmbot.assistant.ui.theme.Surface2
 import com.farmbot.assistant.ui.theme.TextPrimary
 import com.farmbot.assistant.ui.theme.TextSecondary
 import com.farmbot.assistant.ui.theme.TextTertiary
-import com.farmbot.assistant.ui.theme.Warn
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 @Composable
 fun AccountScreen(
     accounts: List<Account>,
-    scanResult: List<Farm>?,
-    scanTarget: String,
     onAdd: () -> Unit,
     onChange: (Account) -> Unit,
     onRemove: (String) -> Unit,
     /** 调整执行顺序：id, -1 上移（提前执行）/ +1 下移 */
     onMove: (String, Int) -> Unit,
-    onScan: (Account) -> Unit,
-    onTestLogin: (Account) -> Unit,
-    onApplyScan: () -> Unit,
-    onDismissScan: () -> Unit,
     onStart: () -> Unit,
+    /** 同步区服：把所有已保存的账号逐个登录一遍，刷新各自的区服列表（不跑农场任务） */
+    onSync: () -> Unit,
     /** 自动化是否在跑；决定「停止」按钮是否可点 */
     running: Boolean,
     onStop: () -> Unit,
     onOpenPerms: () -> Unit,
+    /** 刚点「添加账号」新建的那张卡的 id：只让它播放入场动画 */
+    justAddedId: String? = null,
 ) {
     val farmCount = accounts.sumOf { it.farms.size }
     val selected = accounts.sumOf { it.activeFarms.size }
     val wide = isWideScreen()
     val pad = if (wide) 28.dp else 18.dp
+    val gridState = rememberLazyStaggeredGridState()
+    val listState = rememberLazyListState()
+    // 「添加账号」把空卡插在最前面：自动回到顶部，新卡一眼可见
+    val first = accounts.firstOrNull()
+    LaunchedEffect(first?.id) {
+        if (first != null && first.name.isBlank() && first.qqNick.isBlank()) {
+            if (wide) gridState.animateScrollToItem(0) else listState.animateScrollToItem(0)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -95,34 +128,29 @@ fun AccountScreen(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Header(accounts.size, farmCount, selected, onOpenPerms, pad)
-        val listModifier = Modifier
-            .weight(1f)
-            .widthIn(max = ContentMaxWidth)
-            .fillMaxWidth()
+        val listModifier = Modifier.fillMaxSize()
+        // 列表铺满，操作条以半透明浮层压在列表底部：既能一直看见，又不会把页面切成两截
+        Box(Modifier.weight(1f).widthIn(max = ContentMaxWidth).fillMaxWidth()) {
         if (wide) {
-            // 平板：账号卡片按列铺开，单张卡片不至于横向拉满整屏
-            LazyVerticalGrid(
-                columns = GridCells.Adaptive(560.dp),
+            // 平板：交错网格（瀑布流）。卡片展开/收起后高度差很大，等高网格会被最高的一张撑满整行，
+            // 矮卡片下面就空出一大块；交错网格总是往最短的那一列塞，后面的卡片会自然把空当挤掉
+            LazyVerticalStaggeredGrid(
+                columns = StaggeredGridCells.Adaptive(560.dp),
                 modifier = listModifier,
-                contentPadding = PaddingValues(start = pad, end = pad, bottom = 28.dp),
+                state = gridState,
+                contentPadding = PaddingValues(start = pad, end = pad, bottom = 100.dp),
                 horizontalArrangement = Arrangement.spacedBy(14.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                verticalItemSpacing = 14.dp
             ) {
-                item(span = { GridItemSpan(maxLineSpan) }) {
-                    AddAccountButton(onAdd)
-                }
-
-                if (scanResult != null) {
-                    item(span = { GridItemSpan(maxLineSpan) }) {
-                        ScanBanner(scanResult.size, scanTarget, onApplyScan, onDismissScan)
-                    }
+                item(span = StaggeredGridItemSpan.FullLine) {
+                    AddAccountRow(onAdd, onSync, syncEnabled = accounts.isNotEmpty() && !running)
                 }
 
                 if (accounts.isEmpty()) {
-                    item(span = { GridItemSpan(maxLineSpan) }) { EmptyHint() }
+                    item(span = StaggeredGridItemSpan.FullLine) { EmptyHint() }
                 }
 
-                gridItemsIndexed(accounts, key = { _, a -> a.id }) { index, acc ->
+                staggeredItemsIndexed(accounts, key = { _, a -> a.id }) { index, acc ->
                     AccountCard(
                         index = index,
                         acc = acc,
@@ -134,24 +162,21 @@ fun AccountScreen(
                         onRemove = { onRemove(acc.id) },
                         onMoveUp = { onMove(acc.id, -1) },
                         onMoveDown = { onMove(acc.id, 1) },
-                        onScan = { onScan(acc) },
-                        onTestLogin = { onTestLogin(acc) }
+                        justAdded = acc.id == justAddedId,
+                        modifier = Modifier.animateItem()
                     )
                 }
 
-                item(span = { GridItemSpan(maxLineSpan) }) { FooterNote() }
+                item(span = StaggeredGridItemSpan.FullLine) { FooterNote() }
             }
         } else {
             LazyColumn(
                 modifier = listModifier,
-                contentPadding = PaddingValues(start = pad, end = pad, bottom = 28.dp),
+                state = listState,
+                contentPadding = PaddingValues(start = pad, end = pad, bottom = 100.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                item { AddAccountButton(onAdd) }
-
-                if (scanResult != null) {
-                    item { ScanBanner(scanResult.size, scanTarget, onApplyScan, onDismissScan) }
-                }
+                item { AddAccountRow(onAdd, onSync, syncEnabled = accounts.isNotEmpty() && !running) }
 
                 if (accounts.isEmpty()) {
                     item { EmptyHint() }
@@ -169,8 +194,8 @@ fun AccountScreen(
                         onRemove = { onRemove(acc.id) },
                         onMoveUp = { onMove(acc.id, -1) },
                         onMoveDown = { onMove(acc.id, 1) },
-                        onScan = { onScan(acc) },
-                        onTestLogin = { onTestLogin(acc) }
+                        justAdded = acc.id == justAddedId,
+                        modifier = Modifier.animateItem()
                     )
                 }
 
@@ -179,102 +204,71 @@ fun AccountScreen(
         }
 
         BottomBar(
-            count = selected,
-            // 三种情况可点：
-            //   有选中农场 → 正常执行任务；
-            //   账号非空但没选农场 → 自动登录第一个启用账号（不需要先选农场）；
-            //   一个账号都没有 → 走「登录 → 自动识别账号 → 同步区服」的引导
-            enabled = selected > 0 || accounts.isNotEmpty(),
+            // 开始执行只按账号列表逐个登录，跟农场/区服选择无关：有账号就能点
+            enabled = accounts.isNotEmpty(),
             running = running,
             onStart = onStart,
             onStop = onStop,
-            pad = pad
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(horizontal = pad, vertical = 10.dp)
+                .widthIn(max = ActionMaxWidth)
         )
+        }
     }
 }
 
 @Composable
 private fun BottomBar(
-    count: Int,
     enabled: Boolean,
     running: Boolean,
     onStart: () -> Unit,
     onStop: () -> Unit,
-    pad: Dp,
+    modifier: Modifier = Modifier,
 ) {
-    Column(
-        modifier = Modifier
+    Row(
+        modifier = modifier
             .fillMaxWidth()
-            .background(Surface1)
+            .clip(RoundedCornerShape(24.dp))
+            .background(Surface1.copy(alpha = 0.86f))
+            .border(1.dp, Line.copy(alpha = 0.7f), RoundedCornerShape(24.dp))
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
-            Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(Line)
-        )
-        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-            Row(
-                modifier = Modifier
-                    .widthIn(max = ActionMaxWidth)
-                    .fillMaxWidth()
-                    .padding(horizontal = pad, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(50.dp)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(if (enabled) Cyan else Surface2)
-                        .clickable(enabled = enabled) { onStart() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "开始执行",
-                            color = if (enabled) Color(0xFF04262B) else TextTertiary,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                        if (count > 0) {
-                            Spacer(Modifier.width(8.dp))
-                            Box(
-                                Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(Color(0xFF04262B).copy(alpha = if (enabled) 0.16f else 0.35f))
-                                    .padding(horizontal = 7.dp, vertical = 2.dp)
-                            ) {
-                                Text(
-                                    "$count 个农场",
-                                    color = if (enabled) Color(0xFF04262B) else TextTertiary,
-                                    fontSize = 11.sp
-                                )
-                            }
-                        }
-                    }
-                }
+            modifier = Modifier
+                .weight(1f)
+                .height(46.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .background(if (enabled) Cyan else Surface2.copy(alpha = 0.7f))
+                .clickable(enabled = enabled) { onStart() },
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                "开始执行",
+                color = if (enabled) Color(0xFF04262B) else TextTertiary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium
+            )
+        }
 
-                Spacer(Modifier.width(10.dp))
+        Spacer(Modifier.width(8.dp))
 
-                // 强制停止：只在自动化运行中可点，空闲时保持灰色
-                Box(
-                    modifier = Modifier
-                        .width(68.dp)
-                        .height(42.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Surface2)
-                        .border(1.dp, Line, RoundedCornerShape(12.dp))
-                        .clickable(enabled = running) { onStop() },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        "停止",
-                        color = if (running) TextPrimary else TextTertiary.copy(alpha = 0.45f),
-                        fontSize = 13.sp
-                    )
-                }
-            }
+        // 停止做成描边幽灵按钮，比实心块轻，不抢「开始执行」的视线
+        Box(
+            modifier = Modifier
+                .width(66.dp)
+                .height(38.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .border(1.dp, Line, RoundedCornerShape(16.dp))
+                .clickable(enabled = running) { onStop() },
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                "停止",
+                color = if (running) TextPrimary else TextTertiary.copy(alpha = 0.45f),
+                fontSize = 13.sp
+            )
         }
     }
 }
@@ -348,21 +342,41 @@ private fun AccountCard(
     onRemove: () -> Unit,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
-    onScan: () -> Unit,
-    onTestLogin: () -> Unit,
+    justAdded: Boolean = false,
+    modifier: Modifier = Modifier,
 ) {
     var expanded by remember(acc.id) { mutableStateOf(true) }
+    // 「全选/取消全选」的批次号：每点一次自增，各行据此按顺序错开动画
+    var batch by remember(acc.id) { mutableStateOf(0) }
+    // 当前滑出垃圾桶的那一行；非空时其它行保持收起
+    var swipedFarm by remember(acc.id) { mutableStateOf<String?>(null) }
+    // 删账号的二次确认弹窗
+    var confirmDelete by remember(acc.id) { mutableStateOf(false) }
     val isQQ = acc.loginType == LoginType.QQ || acc.loginType == LoginType.QQ_QR
     val accent = if (isQQ) Cyan else Purple
     val shape = RoundedCornerShape(18.dp)
+    // 刚点击「添加账号」插进来的空卡：从略小、透明「弹」到正常大小
+    val appear = remember(acc.id) { Animatable(if (justAdded) 0f else 1f) }
+    LaunchedEffect(justAdded) {
+        if (justAdded) {
+            appear.animateTo(1f, spring(dampingRatio = 0.6f, stiffness = Spring.StiffnessMediumLow))
+        }
+    }
 
     Column(
-        modifier = Modifier
+        modifier = modifier
+            .graphicsLayer {
+                val p = appear.value
+                alpha = p
+                scaleX = 0.94f + 0.06f * p
+                scaleY = 0.94f + 0.06f * p
+                transformOrigin = TransformOrigin(0.5f, 0f)
+            }
             .fillMaxWidth()
             .clip(shape)
             .background(Surface1)
             .border(1.dp, Line, shape)
-            .padding(14.dp)
+            .padding(horizontal = 20.dp, vertical = 18.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
@@ -384,11 +398,57 @@ private fun AccountCard(
                 modifier = Modifier
                     .size(30.dp)
                     .clip(CircleShape)
-                    .clickable { onRemove() },
+                    .clickable { confirmDelete = true },
                 contentAlignment = Alignment.Center
             ) {
                 Text("✕", color = TextTertiary, fontSize = 13.sp)
             }
+        }
+
+        // 删除账号要二次确认：第一下只弹提示，避免点偏就把整张卡连同区服删掉
+        if (confirmDelete) {
+            AlertDialog(
+                onDismissRequest = { confirmDelete = false },
+                title = {
+                    Text("删除这个账号？", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                },
+                text = {
+                    Text(
+                        "「${acc.name.ifBlank { "未命名账号" }}」以及它下面的 ${acc.farms.size} 个区服会一起删除，删除后不能恢复。",
+                        color = TextSecondary,
+                        fontSize = 13.sp
+                    )
+                },
+                confirmButton = {
+                    Text(
+                        "删除",
+                        color = Danger,
+                        fontSize = 14.sp,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable {
+                                confirmDelete = false
+                                onRemove()
+                            }
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                    )
+                },
+                dismissButton = {
+                    Text(
+                        "取消",
+                        color = TextSecondary,
+                        fontSize = 14.sp,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { confirmDelete = false }
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                    )
+                },
+                containerColor = Surface1,
+                textContentColor = TextSecondary,
+                titleContentColor = TextPrimary,
+                shape = RoundedCornerShape(16.dp)
+            )
         }
 
         Spacer(Modifier.height(10.dp))
@@ -396,7 +456,8 @@ private fun AccountCard(
         Row(verticalAlignment = Alignment.CenterVertically) {
             // 左边是这个账号本身的名字：QQ 账号昵称（微信账号就是微信昵称）
             val nick = if (isQQ) acc.qqNick else acc.name
-            Box(Modifier.weight(1f)) {
+            Column(Modifier.weight(1f)) {
+            Box {
                 if (nick.isEmpty()) {
                     Text(
                         if (isQQ) "QQ 昵称，如：主号" else "微信昵称，如：主号",
@@ -420,39 +481,59 @@ private fun AccountCard(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
-            // 右边是这个账号授权给游戏的哪个身份。微信没有多身份，省掉
+            // 昵称下面那行放 QQ 号：切号时 OCR 到的会自动填上，没识别到也能手动输入
             if (isQQ) {
-                Spacer(Modifier.width(8.dp))
-                IdentityPicker(acc.name, acc.identities, accent) { onChange(acc.copy(name = it)) }
+                Spacer(Modifier.height(3.dp))
+                Box {
+                    if (acc.qqNo.isEmpty()) {
+                        Text(
+                            "QQ 号，如：123456789",
+                            color = TextTertiary.copy(alpha = 0.7f),
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(vertical = 1.dp)
+                        )
+                    }
+                    BasicTextField(
+                        value = acc.qqNo,
+                        onValueChange = { onChange(acc.copy(qqNo = it.filter { c -> c.isDigit() }.take(12))) },
+                        singleLine = true,
+                        textStyle = TextStyle(color = TextSecondary, fontSize = 12.sp),
+                        cursorBrush = SolidColor(accent),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             }
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(10.dp))
-                    .clickable { expanded = !expanded }
-                    .padding(horizontal = 8.dp, vertical = 9.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    if (acc.farms.isEmpty()) "暂无农场"
-                    else "${acc.activeFarms.size}/${acc.farms.size} 个农场",
-                    color = if (acc.farms.isEmpty()) TextTertiary else TextSecondary,
-                    fontSize = 12.sp
-                )
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    if (expanded) "收起" else "展开",
-                    color = TextSecondary,
-                    fontSize = 11.sp
-                )
-                Spacer(Modifier.width(4.dp))
-                Caret(up = expanded, color = TextSecondary)
+            }
+            Spacer(Modifier.width(10.dp))
+            // 右列：身份下拉 + 农场数量都贴右，跟左列的「昵称 / QQ 号」组成对称两栏，
+            // 不然小字散在整行两侧，视觉重心会往右下角坠
+            Column(horizontalAlignment = Alignment.End) {
+                if (isQQ) {
+                    IdentityPicker(acc.name, acc.identities, accent) { onChange(acc.copy(name = it)) }
+                    Spacer(Modifier.height(2.dp))
+                }
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { expanded = !expanded }
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        if (acc.farms.isEmpty()) "暂无农场"
+                        else "${acc.activeFarms.size}/${acc.farms.size} 个农场",
+                        color = if (acc.farms.isEmpty()) TextTertiary else TextSecondary,
+                        fontSize = 12.sp
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        if (expanded) "收起" else "展开",
+                        color = TextSecondary,
+                        fontSize = 11.sp
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Caret(up = expanded, color = TextSecondary)
+                }
             }
         }
 
@@ -464,12 +545,78 @@ private fun AccountCard(
                     .height(1.dp)
                     .background(Line)
             )
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(4.dp))
 
-            acc.farms.forEach { farm ->
+            // 区服列表的头部：左边全选/全不选，右边手动补一个区服
+            val allOn = acc.farms.isNotEmpty() && acc.farms.all { it.enabled }
+            val toggleAll = {
+                if (acc.farms.isNotEmpty()) {
+                    val next = !allOn
+                    // 递增批次号：让每行知道这次是「全选」触发的，按行号依次延迟出现/消失
+                    batch++
+                    onChange(acc.copy(farms = acc.farms.map { it.copy(enabled = next) }))
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    // 全选这一行和下面的区服行之间留出距离，避免两个复选框挤在一起看错
+                    .padding(top = 4.dp, bottom = 14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(enabled = acc.farms.isNotEmpty()) { toggleAll() }
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CheckDot(allOn, accent, toggleAll)
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        if (allOn) "取消全选" else "全选",
+                        color = if (acc.farms.isEmpty()) TextTertiary else TextSecondary,
+                        fontSize = 12.sp
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .border(1.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                        .clickable { onChange(acc.copy(farms = acc.farms + Farm())) }
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("＋ 添加服", color = accent, fontSize = 11.sp)
+                }
+            }
+
+            if (acc.farms.isEmpty()) {
+                Text(
+                    "还没有区服，点右上「添加服」手动填，或用上面的「同步区服」自动抓",
+                    color = TextTertiary,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(vertical = 6.dp)
+                )
+            }
+
+            acc.farms.forEachIndexed { index, farm ->
                 FarmRow(
                     farm = farm,
                     accent = accent,
+                    // 第 index 行：全选时延后 index*35ms，形成从上往下依次出现的涟漪
+                    batch = batch,
+                    stagger = index * 35,
+                    // 同时只允许一行处于「已滑出垃圾桶」状态
+                    swiped = swipedFarm == farm.id,
+                    onSwipedChange = { open ->
+                        swipedFarm = when {
+                            open -> farm.id
+                            swipedFarm == farm.id -> null
+                            else -> swipedFarm
+                        }
+                    },
                     onChange = { changed ->
                         onChange(acc.copy(farms = acc.farms.map { if (it.id == changed.id) changed else it }))
                     },
@@ -477,17 +624,6 @@ private fun AccountCard(
                         onChange(acc.copy(farms = acc.farms.filterNot { it.id == farm.id }))
                     }
                 )
-            }
-
-            Spacer(Modifier.height(4.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                MiniButton("试登录", accent, onTestLogin)
-                Spacer(Modifier.width(6.dp))
-                MiniButton("＋ 添加农场", accent) {
-                    onChange(acc.copy(farms = acc.farms + Farm()))
-                }
-                Spacer(Modifier.width(6.dp))
-                MiniButton("扫描区服", Cyan, onScan)
             }
         }
     }
@@ -497,91 +633,219 @@ private fun AccountCard(
 private fun FarmRow(
     farm: Farm,
     accent: Color,
+    batch: Int = 0,
+    stagger: Int = 0,
+    /** 这一行是否处于滑出垃圾桶状态（由卡片统一管理，保证同时只有一行） */
+    swiped: Boolean = false,
+    onSwipedChange: (Boolean) -> Unit = {},
     onChange: (Farm) -> Unit,
     onRemove: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 7.dp),
-        verticalAlignment = Alignment.Top
+    SwipeToDelete(
+        open = swiped,
+        onOpenChange = onSwipedChange,
+        onDelete = onRemove
     ) {
-        CheckDot(farm.enabled, accent) { onChange(farm.copy(enabled = !farm.enabled)) }
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
-            Box {
-                if (farm.server.isEmpty()) {
-                    Text("区服，如 手Q549区 蔬乡物语", color = TextTertiary, fontSize = 13.sp)
-                }
-                BasicTextField(
-                    value = farm.server,
-                    onValueChange = { onChange(farm.copy(server = it)) },
-                    singleLine = true,
-                    textStyle = TextStyle(color = TextPrimary, fontSize = 13.sp),
-                    cursorBrush = SolidColor(accent),
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            Spacer(Modifier.height(3.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.weight(1f)) {
-                    if (farm.role.isEmpty()) {
-                        Text("角色名", color = TextTertiary, fontSize = 11.sp)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Bg)
+                .padding(vertical = 7.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            CheckDot(farm.enabled, accent, { onChange(farm.copy(enabled = !farm.enabled)) }, batch, stagger)
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Box {
+                    if (farm.server.isEmpty()) {
+                        Text("区服，如 手Q549区 蔬乡物语", color = TextTertiary, fontSize = 13.sp)
                     }
                     BasicTextField(
-                        value = farm.role,
-                        onValueChange = { onChange(farm.copy(role = it)) },
+                        value = farm.server,
+                        onValueChange = { onChange(farm.copy(server = it)) },
                         singleLine = true,
-                        textStyle = TextStyle(color = TextSecondary, fontSize = 11.sp),
+                        textStyle = TextStyle(color = TextPrimary, fontSize = 13.sp),
                         cursorBrush = SolidColor(accent),
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
-                if (farm.level > 0) {
-                    Text("Lv.${farm.level}", color = TextTertiary, fontSize = 11.sp)
+                Spacer(Modifier.height(3.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.weight(1f)) {
+                        if (farm.role.isEmpty()) {
+                            Text("角色名", color = TextTertiary, fontSize = 11.sp)
+                        }
+                        BasicTextField(
+                            value = farm.role,
+                            onValueChange = { onChange(farm.copy(role = it)) },
+                            singleLine = true,
+                            textStyle = TextStyle(color = TextSecondary, fontSize = 11.sp),
+                            cursorBrush = SolidColor(accent),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    if (farm.level > 0) {
+                        Text("Lv.${farm.level}", color = TextTertiary, fontSize = 11.sp)
+                    }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * 微信聊天式左滑删除：向左拖出红色垃圾桶，再点垃圾桶才真的删。
+ * 拖不到一半松手会弹回去，避免误删。
+ */
+@Composable
+private fun SwipeToDelete(
+    open: Boolean,
+    onOpenChange: (Boolean) -> Unit,
+    onDelete: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    val density = LocalDensity.current
+    val revealPx = with(density) { 68.dp.toPx() }
+    val offsetX = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    // 展开状态由卡片统一持有：别的行滑开时，这一行自动退回
+    LaunchedEffect(open) {
+        offsetX.animateTo(if (open) -revealPx else 0f, tween(180))
+    }
+    Box(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.matchParentSize(),
+            horizontalArrangement = Arrangement.End
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(60.dp)
+                    .fillMaxHeight()
+                    .padding(vertical = 4.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Danger.copy(alpha = 0.12f))
+                    .border(1.dp, Danger.copy(alpha = 0.45f), RoundedCornerShape(10.dp))
+                    .clickable { onDelete() },
+                contentAlignment = Alignment.Center
+            ) {
+                TrashIcon()
             }
         }
         Box(
             modifier = Modifier
-                .size(26.dp)
-                .clip(CircleShape)
-                .clickable { onRemove() },
-            contentAlignment = Alignment.Center
+                .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+                .draggable(
+                    orientation = Orientation.Horizontal,
+                    state = rememberDraggableState { delta ->
+                        scope.launch {
+                            offsetX.snapTo((offsetX.value + delta).coerceIn(-revealPx, 0f))
+                        }
+                    },
+                    onDragStopped = {
+                        val nowOpen = offsetX.value < -revealPx * 0.45f
+                        scope.launch {
+                            offsetX.animateTo(if (nowOpen) -revealPx else 0f, tween(180))
+                        }
+                        onOpenChange(nowOpen)
+                    }
+                )
         ) {
-            Text("✕", color = TextTertiary, fontSize = 11.sp)
+            content()
         }
     }
 }
 
 @Composable
-private fun CheckDot(checked: Boolean, accent: Color, onToggle: () -> Unit) {
+private fun TrashIcon() {
+    Canvas(Modifier.size(16.dp)) {
+        val w = size.width
+        val h = size.height
+        val stroke = w * 0.11f
+        val c = Danger
+        // 桶盖
+        drawLine(c, Offset(w * 0.12f, h * 0.24f), Offset(w * 0.88f, h * 0.24f), stroke, StrokeCap.Round)
+        // 提手
+        drawLine(c, Offset(w * 0.36f, h * 0.24f), Offset(w * 0.38f, h * 0.10f), stroke, StrokeCap.Round)
+        drawLine(c, Offset(w * 0.62f, h * 0.24f), Offset(w * 0.60f, h * 0.10f), stroke, StrokeCap.Round)
+        drawLine(c, Offset(w * 0.38f, h * 0.10f), Offset(w * 0.62f, h * 0.10f), stroke, StrokeCap.Round)
+        // 桶身
+        val p = Path().apply {
+            moveTo(w * 0.22f, h * 0.24f)
+            lineTo(w * 0.28f, h * 0.9f)
+            lineTo(w * 0.72f, h * 0.9f)
+            lineTo(w * 0.78f, h * 0.24f)
+        }
+        drawPath(p, c, style = Stroke(stroke, cap = StrokeCap.Round, join = StrokeJoin.Round))
+        // 两道竖纹
+        drawLine(c, Offset(w * 0.42f, h * 0.4f), Offset(w * 0.44f, h * 0.74f), stroke * 0.8f, StrokeCap.Round)
+        drawLine(c, Offset(w * 0.58f, h * 0.4f), Offset(w * 0.56f, h * 0.74f), stroke * 0.8f, StrokeCap.Round)
+    }
+}
+
+@Composable
+private fun CheckDot(
+    checked: Boolean,
+    accent: Color,
+    onToggle: () -> Unit,
+    /** 「全选」批次号：变化说明这次是批量操作，需要按 stagger 错开 */
+    batch: Int = 0,
+    /** 错开时长（毫秒），由上往下的行号决定 */
+    stagger: Int = 0,
+) {
+    // 底色和描边跟着勾选状态淡入淡出，不再硬切
+    val fill by animateColorAsState(
+        if (checked) accent.copy(alpha = 0.9f) else Color.Transparent,
+        tween(160),
+        label = "dotFill"
+    )
+    val stroke by animateColorAsState(
+        if (checked) accent else Line,
+        tween(160),
+        label = "dotStroke"
+    )
+    // 勾号：勾上时带一点回弹放大出来，取消时快速缩回淡出
+    val mark = remember { Animatable(if (checked) 1f else 0f) }
+    // 只有「全选」批次变化时才延迟，单点某一个不受影响
+    var lastBatch by remember { mutableStateOf(batch) }
+    LaunchedEffect(checked, batch) {
+        val fromBatch = batch != lastBatch
+        lastBatch = batch
+        if (fromBatch && stagger > 0) delay(stagger.toLong())
+        if (checked) {
+            mark.animateTo(1f, spring(dampingRatio = 0.42f, stiffness = Spring.StiffnessMedium))
+        } else {
+            mark.animateTo(0f, tween(110))
+        }
+    }
     Box(
         modifier = Modifier
             .size(20.dp)
             .clip(RoundedCornerShape(6.dp))
-            .background(if (checked) accent.copy(alpha = 0.9f) else Color.Transparent)
-            .border(
-                1.5.dp,
-                if (checked) accent else Line,
-                RoundedCornerShape(6.dp)
-            )
+            .background(fill)
+            .border(1.5.dp, stroke, RoundedCornerShape(6.dp))
             .clickable { onToggle() },
         contentAlignment = Alignment.Center
     ) {
-        if (checked) {
-            Canvas(Modifier.size(11.dp)) {
-                val p = Path().apply {
-                    moveTo(0f, size.height * 0.52f)
-                    lineTo(size.width * 0.38f, size.height * 0.82f)
-                    lineTo(size.width, size.height * 0.18f)
+        Canvas(
+            Modifier
+                .size(11.dp)
+                .graphicsLayer {
+                    val m = mark.value
+                    scaleX = m
+                    scaleY = m
+                    alpha = m
                 }
-                drawPath(p, Bg, style = androidx.compose.ui.graphics.drawscope.Stroke(
-                    width = size.width * 0.24f,
-                    cap = androidx.compose.ui.graphics.StrokeCap.Round,
-                    join = androidx.compose.ui.graphics.StrokeJoin.Round
-                ))
+        ) {
+            val p = Path().apply {
+                moveTo(0f, size.height * 0.52f)
+                lineTo(size.width * 0.38f, size.height * 0.82f)
+                lineTo(size.width, size.height * 0.18f)
             }
+            drawPath(p, Bg, style = androidx.compose.ui.graphics.drawscope.Stroke(
+                width = size.width * 0.24f,
+                cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                join = androidx.compose.ui.graphics.StrokeJoin.Round
+            ))
         }
     }
 }
@@ -717,104 +981,44 @@ private fun IdentityPicker(
 }
 
 @Composable
-private fun ScanBanner(count: Int, target: String, onApply: () -> Unit, onDismiss: () -> Unit) {
-    val c = if (count > 0) Cyan else Warn
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(c.copy(alpha = 0.08f))
-            .border(1.dp, c.copy(alpha = 0.30f), RoundedCornerShape(14.dp))
-            .padding(14.dp)
-    ) {
-        Text(
-            if (count > 0) "扫描到 $count 个区服" else "未识别到区服",
-            color = TextPrimary,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            if (count > 0) "确认加入该账号？已存在的区服会自动跳过"
-            else "请先在游戏内打开「选择服务器 → 我的服务器」面板后重试",
-            color = TextSecondary,
-            fontSize = 12.sp,
-            lineHeight = 17.sp
-        )
-        if (count > 0) {
-            Spacer(Modifier.height(11.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(9.dp))
-                        .background(c.copy(alpha = 0.18f))
-                        .clickable { onApply() }
-                        .padding(vertical = 10.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        if (target.isEmpty()) "全部加入" else "全部加入「$target」",
-                        color = c,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(9.dp))
-                        .border(1.dp, Line, RoundedCornerShape(9.dp))
-                        .clickable { onDismiss() }
-                        .padding(horizontal = 18.dp, vertical = 10.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("忽略", color = TextSecondary, fontSize = 13.sp)
-                }
-            }
-        } else {
-            Spacer(Modifier.height(10.dp))
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(9.dp))
-                    .border(1.dp, Line, RoundedCornerShape(9.dp))
-                    .clickable { onDismiss() }
-                    .padding(horizontal = 18.dp, vertical = 9.dp)
-            ) {
-                Text("知道了", color = TextSecondary, fontSize = 13.sp)
-            }
-        }
-    }
-}
-
-@Composable
-private fun MiniButton(label: String, color: Color, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(9.dp))
-            .clickable { onClick() }
-            .padding(horizontal = 10.dp, vertical = 8.dp)
-    ) {
-        Text(label, color = color, fontSize = 12.sp)
-    }
-}
-
-@Composable
-private fun AddAccountButton(onAdd: () -> Unit) {
+private fun AddAccountRow(onAdd: () -> Unit, onSync: () -> Unit, syncEnabled: Boolean) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(Surface2.copy(alpha = 0.55f))
-            .border(1.dp, Line, RoundedCornerShape(14.dp))
-            .clickable { onAdd() }
-            .padding(vertical = 15.dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("＋", color = Cyan, fontSize = 15.sp)
-        Spacer(Modifier.width(8.dp))
-        Text("添加账号", color = Cyan, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .height(50.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(Surface2.copy(alpha = 0.55f))
+                .border(1.dp, Line, RoundedCornerShape(14.dp))
+                .clickable { onAdd() },
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("＋", color = Cyan, fontSize = 15.sp)
+            Spacer(Modifier.width(8.dp))
+            Text("添加账号", color = Cyan, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+        }
+        Row(
+            modifier = Modifier
+                .width(150.dp)
+                .height(50.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(if (syncEnabled) Surface2 else Surface2.copy(alpha = 0.3f))
+                .border(1.dp, Line, RoundedCornerShape(14.dp))
+                .clickable(enabled = syncEnabled) { onSync() },
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "同步区服",
+                color = if (syncEnabled) TextPrimary else TextTertiary.copy(alpha = 0.5f),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium
+            )
+        }
     }
 }
 
@@ -841,7 +1045,7 @@ private fun EmptyHint() {
 @Composable
 private fun FooterNote() {
     Text(
-        "一个账号可下辖多个区服农场。执行时会按顺序：登录账号 → 换区 → 进入农场 → 执行任务。",
+        "一个账号可下辖多个区服农场。执行时会按顺序：登录账号 → 进入农场 → 执行任务；区服由「同步区服」单独维护。",
         color = TextTertiary,
         fontSize = 11.sp,
         lineHeight = 17.sp,
