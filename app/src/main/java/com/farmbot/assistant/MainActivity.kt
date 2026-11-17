@@ -16,6 +16,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -24,12 +25,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.farmbot.assistant.alarm.SystemAlarm
 import com.farmbot.assistant.bot.BotService
+import com.farmbot.assistant.bot.ClosePopupFlow
+import com.farmbot.assistant.bot.EnterFarmFlow
+import com.farmbot.assistant.bot.EnterGameFlow
 import com.farmbot.assistant.bot.FlowControl
 import com.farmbot.assistant.bot.LoginFlow
 import com.farmbot.assistant.core.IO
 import com.farmbot.assistant.data.Account
 import com.farmbot.assistant.data.AccountStore
 import com.farmbot.assistant.data.LoginType
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import com.farmbot.assistant.overlay.FloatingOverlay
 import com.farmbot.assistant.perm.Perms
@@ -39,8 +44,10 @@ import com.farmbot.assistant.ui.LogsPage
 import com.farmbot.assistant.ui.PermissionScreen
 import com.farmbot.assistant.ui.RulesPage
 import com.farmbot.assistant.ui.SettingsPage
+import com.farmbot.assistant.ui.UpdateBanner
 import com.farmbot.assistant.ui.theme.Bg
 import com.farmbot.assistant.ui.theme.FarmBotTheme
+import com.farmbot.assistant.update.Updater
 import kotlinx.coroutines.delay
 
 data class PermState(
@@ -93,6 +100,8 @@ class MainActivity : ComponentActivity() {
         }
         refreshPerms()
         syncAlarm()
+        // 检测更新：进入检测一次，进程存活期间每小时轮询一次
+        Updater.start(this)
 
         setContent {
             FarmBotTheme {
@@ -202,6 +211,105 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
+                /**
+                 * 「开始执行」（当前模块）：登录第一个有勾选区服的账号 → EnterGameFlow
+                 * 识别当前区 / 换区选中目标区 / 点开始游戏。多账号队列与进农场等后续模块接入后再扩展。
+                 */
+                fun runExec(cur: Account, epoch: Int) {
+                    // 点过「停止」：链路要断，不能因为 done 回调继续往下走
+                    if (FlowControl.cancelEpoch != epoch) {
+                        queueRunning.value = false
+                        return
+                    }
+                    // 其它 QQ 账号已占用的名字：登录切号时要排除
+                    val takenQq = accounts
+                        .filter { it.loginType == LoginType.QQ && it.id != cur.id }
+                        .flatMap { listOf(it.qqNick, it.name) + it.identities }
+                        .filter { it.isNotBlank() }
+                        .toSet()
+                    LoginFlow.startAuto(
+                        this@MainActivity,
+                        cur,
+                        status = { FloatingOverlay.setText(it) },
+                        done = { updated, msg ->
+                            update(accounts.map { if (it.id == cur.id) updated else it })
+                            if (FlowControl.cancelEpoch != epoch) {
+                                queueRunning.value = false
+                                return@startAuto
+                            }
+                            // 登录没成功就停在这里：区服没核实之前绝不能拿别的账号的会话去换区
+                            if (!msg.startsWith("已登录")) {
+                                queueRunning.value = false
+                                FloatingOverlay.setText(msg)
+                                toast(msg)
+                                window.decorView.postDelayed(
+                                    { FloatingOverlay.hide(this@MainActivity) }, 3000
+                                )
+                                return@startAuto
+                            }
+                            EnterGameFlow.start(
+                                this@MainActivity,
+                                updated,
+                                status = { FloatingOverlay.setText(it) },
+                                done = { m ->
+                                    if (FlowControl.cancelEpoch != epoch) {
+                                        queueRunning.value = false
+                                        return@start
+                                    }
+                                    // 进游戏成功 → 接着清理游戏内弹窗；没进去就停链
+                                    if (m.startsWith("已进入")) {
+                                        ClosePopupFlow.start(
+                                            this@MainActivity,
+                                            status = { FloatingOverlay.setText(it) },
+                                            done = { m2 ->
+                                                if (FlowControl.cancelEpoch != epoch) {
+                                                    queueRunning.value = false
+                                                    return@start
+                                                }
+                                                // 弹窗清完（两种收尾文案都以「游戏内」开头）→ 接着进农场；
+                                                // 超时/停止等失败文案不进农场
+                                                if (m2.startsWith("游戏内")) {
+                                                    EnterFarmFlow.start(
+                                                        this@MainActivity,
+                                                        status = { FloatingOverlay.setText(it) },
+                                                        done = { m3 ->
+                                                            queueRunning.value = false
+                                                            if (FlowControl.cancelEpoch == epoch) {
+                                                                FloatingOverlay.setText(m3)
+                                                                toast(m3)
+                                                                window.decorView.postDelayed(
+                                                                    { FloatingOverlay.hide(this@MainActivity) }, 4000
+                                                                )
+                                                            }
+                                                        },
+                                                    )
+                                                } else {
+                                                    queueRunning.value = false
+                                                    FloatingOverlay.setText(m2)
+                                                    toast(m2)
+                                                    window.decorView.postDelayed(
+                                                        { FloatingOverlay.hide(this@MainActivity) }, 4000
+                                                    )
+                                                }
+                                            },
+                                        )
+                                    } else {
+                                        queueRunning.value = false
+                                        FloatingOverlay.setText(m)
+                                        toast(m)
+                                        window.decorView.postDelayed(
+                                            { FloatingOverlay.hide(this@MainActivity) }, 4000
+                                        )
+                                    }
+                                },
+                            )
+                        },
+                        excludeQq = takenQq,
+                        // 日常执行只登录不抓区服：区服数据由「同步区服」维护
+                        syncFarms = false,
+                    )
+                }
+
                 // 倒计时：每秒刷新一次剩余时间，到点自动清空
                 val pendingAt = alarmAt.value
                 LaunchedEffect(pendingAt) {
@@ -221,6 +329,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val p = perms.value
+                Box(Modifier.fillMaxSize()) {
                 // 权限页只在两种情况下出现：用户主动点「权限」，或无障碍服务没开
                 if (showPerms || !p.acc) {
                     PermissionScreen(
@@ -241,32 +350,32 @@ class MainActivity : ComponentActivity() {
                             toast("已重新检查各权限状态")
                         },
                         onAccessibility = {
-                            if (!Perms.openAccessibility(this)) {
+                            if (!Perms.openAccessibility(this@MainActivity)) {
                                 toast("无法打开无障碍设置页")
                             }
                         },
                         onNotification = { requestNotification() },
                         onOverlay = {
-                            if (!Perms.openOverlay(this)) {
+                            if (!Perms.openOverlay(this@MainActivity)) {
                                 toast("无法打开悬浮窗设置页")
                             }
                         },
                         onBgPopup = {
-                            if (!Perms.openMiuiPermissions(this)) {
+                            if (!Perms.openMiuiPermissions(this@MainActivity)) {
                                 toast("无法打开权限设置页")
                             }
                         },
                         onAlarm = {
-                            if (!Perms.openExactAlarm(this)) {
+                            if (!Perms.openExactAlarm(this@MainActivity)) {
                                 toast("无法打开精确闹钟设置页，请到应用权限里手动开启「闹钟和提醒」")
                             }
                         },
                         onAlarmTest = {
-                            if (!Perms.canScheduleExactAlarms(this)) {
+                            if (!Perms.canScheduleExactAlarms(this@MainActivity)) {
                                 toast("还没有精确闹钟权限，先开启再试")
-                                Perms.openExactAlarm(this)
+                                Perms.openExactAlarm(this@MainActivity)
                             } else {
-                                val at = SystemAlarm.setAfter(this, 60)
+                                val at = SystemAlarm.setAfter(this@MainActivity, 60)
                                 if (at == null) {
                                     toast("没能在系统时钟里创建闹钟，请确认手机时钟可用")
                                 } else {
@@ -277,20 +386,20 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         onAlarmOpen = {
-                            if (!SystemAlarm.openClock(this)) toast("无法打开时钟，请手动打开")
+                            if (!SystemAlarm.openClock(this@MainActivity)) toast("无法打开时钟，请手动打开")
                         },
                         onAutoStart = {
-                            if (!Perms.openAutoStart(this)) {
+                            if (!Perms.openAutoStart(this@MainActivity)) {
                                 toast("无法打开自启动设置页，请到安全中心手动开启")
                             }
                         },
                         onBattery = {
-                            if (!Perms.openBatteryPolicy(this)) {
+                            if (!Perms.openBatteryPolicy(this@MainActivity)) {
                                 toast("无法打开省电策略页")
                             }
                         },
                         onTile = {
-                            Perms.requestAddTile(this) { msg ->
+                            Perms.requestAddTile(this@MainActivity) { msg ->
                                 toast(msg)
                                 // 回调时磁贴状态已经复查过；再补两次刷新，等 SystemUI 落库
                                 refreshPerms()
@@ -362,9 +471,35 @@ class MainActivity : ComponentActivity() {
                             refreshPerms()
                         },
                         justAddedId = justAddedId,
-                        // 开始执行：旧的「按顺序登录队列」已删除，等农场任务（收菜/浇水等）接入后再重写
+                        // 开始执行：登录第一个有勾选区服的账号 → 识别/换区 → 点开始游戏
+                        // （多账号串行、进农场、关弹窗等后续模块接入后再扩展）
                         onStart = {
-                            toast("农场任务还没接上，先用「同步区服」维护区服数据")
+                            when {
+                                !Perms.overlayEnabled(this@MainActivity) -> {
+                                    toast("需要悬浮窗权限才能显示执行状态，请先开启")
+                                    Perms.openOverlay(this@MainActivity)
+                                }
+                                queueRunning.value || FlowControl.running.value ->
+                                    toast("正在执行，请等待或先点「停止」")
+                                else -> {
+                                    val target = accounts.firstOrNull {
+                                        it.enabled && !it.loginType.qr && it.activeFarms.isNotEmpty()
+                                    }
+                                    if (target == null) {
+                                        toast("没有已勾选区服的账号，请先在账号卡里勾选要处理的区服")
+                                    } else {
+                                        if (!FloatingOverlay.show(
+                                                this@MainActivity,
+                                                "开始执行：登录「${target.name.ifBlank { "账号" }}」…"
+                                            )
+                                        ) {
+                                            toast("悬浮窗未显示，请检查悬浮窗权限")
+                                        }
+                                        queueRunning.value = true
+                                        runExec(target, FlowControl.cancelEpoch)
+                                    }
+                                }
+                            }
                         },
                         // 同步区服：把本地已保存的账号逐个登录一遍，刷新各自的区服列表
                         onSync = {
@@ -419,8 +554,11 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         // 底部导航固定在最下方；「开始执行」在农场页里，天然位于它上方
-                        BottomNav(selected = tab, onSelect = { tab = it })
+                        BottomNav(selected = tab, onSelect = { tab = it }, badge = Updater.latestTag != null)
                     }
+                }
+                // 新版本提示：盖在最上沿的非模态小横幅，不打断、不遮挡执行中的任务
+                Box(Modifier.fillMaxWidth().align(Alignment.TopCenter)) { UpdateBanner() }
                 }
             }
         }
@@ -446,7 +584,7 @@ class MainActivity : ComponentActivity() {
             notif = Perms.notificationsEnabled(this),
             overlay = Perms.overlayEnabled(this),
             bgPopup = Perms.backgroundPopupState(this) == true,
-            alarm = Perms.canScheduleExactAlarms(this),
+            alarm = Perms.canScheduleExactAlarms(this@MainActivity),
             autoStart = Perms.autoStartState(this) == true,
             battery = Perms.batteryUnrestricted(this),
             tile = Perms.tileAdded(this),

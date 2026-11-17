@@ -12,6 +12,10 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- 系统时钟的 HandleSetAlarmActivity 声明了这个普通权限，不申请会被 Permission Denial 拒掉 -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+    <!-- 检测更新 / 后台下载新版本 APK -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 下载完成后拉起系统安装器自更新 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- Android 11+ 包可见性：不声明就解析不到系统时钟，SET_ALARM 会抛 ActivityNotFoundException -->
     <queries>
@@ -20,6 +24,11 @@
         </intent>
         <intent>
             <action android:name="android.intent.action.SHOW_ALARMS" />
+        </intent>
+        <!-- 包可见性同样挡安装意图，不声明会解析不到系统安装器 -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="application/vnd.android.package-archive" />
         </intent>
     </queries>
 
@@ -92,6 +101,17 @@
                 android:name="android.service.quicksettings.ACTIVE_TILE"
                 android:value="true" />
         </service>
+
+        <!-- 自更新：把下载好的新版本 APK 交给系统安装器 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.updater"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/update_paths" />
+        </provider>
 
     </application>
 

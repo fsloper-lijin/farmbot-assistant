@@ -2,11 +2,14 @@ package com.farmbot.assistant.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -28,6 +31,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -59,6 +63,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
 import com.farmbot.assistant.core.IO
+import com.farmbot.assistant.update.Updater
 import com.farmbot.assistant.ui.theme.Bg
 import com.farmbot.assistant.ui.theme.Cyan
 import com.farmbot.assistant.ui.theme.Line
@@ -73,9 +78,12 @@ import java.io.File
 
 private val NAV_LABELS = listOf("农场", "规则", "日志", "设置")
 
-/** 底部导航：和微信一样的分栏，点击切换页面 */
+/** 新版本红点 */
+private val BadgeRed = Color(0xFFF04438)
+
+/** 底部导航：和微信一样的分栏，点击切换页面；badge = 右上角有新版本红点 */
 @Composable
-fun BottomNav(selected: Int, onSelect: (Int) -> Unit) {
+fun BottomNav(selected: Int, onSelect: (Int) -> Unit, badge: Boolean = false) {
     Column(Modifier.fillMaxWidth().background(Surface1)) {
         Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -96,7 +104,18 @@ fun BottomNav(selected: Int, onSelect: (Int) -> Unit) {
                             .padding(vertical = 6.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Canvas(Modifier.size(22.dp)) { drawNavGlyph(i, tint) }
+                        Box(contentAlignment = Alignment.TopEnd) {
+                            Canvas(Modifier.size(22.dp)) { drawNavGlyph(i, tint) }
+                            // 「设置」上的新版本红点：不点不打扰，更新完自动消失
+                            if (badge && i == NAV_LABELS.lastIndex) {
+                                Box(
+                                    Modifier
+                                        .padding(top = 1.dp)
+                                        .size(7.dp)
+                                        .background(BadgeRed, CircleShape)
+                                )
+                            }
+                        }
                         Spacer(Modifier.height(3.dp))
                         Text(
                             label,
@@ -630,6 +649,74 @@ fun SettingsPage(onOpenPerms: () -> Unit) {
                 }
             }
             item {
+                // 有新版本：行内亮红点；已下载点一下直接安装，没下载完点一下重新检查
+                val pending = Updater.latestTag != null
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(shape)
+                        .background(Surface1)
+                        .border(1.dp, Line, shape)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                if (pending) {
+                                    if (Updater.install(ctx)) Updater.dismissBanner()
+                                } else {
+                                    Updater.manualCheck(ctx)
+                                }
+                            }
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("检测更新", color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                                if (pending) {
+                                    Spacer(Modifier.width(6.dp))
+                                    Box(Modifier.size(7.dp).background(BadgeRed, CircleShape))
+                                }
+                            }
+                            Spacer(Modifier.height(3.dp))
+                            Text(
+                                Updater.status.ifBlank { "从 GitHub 检查新版本" },
+                                color = TextSecondary, fontSize = 12.sp
+                            )
+                        }
+                    }
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
+                    var autoOn by remember { mutableStateOf(Updater.autoEnabled(ctx)) }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "自动检测更新",
+                            color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(
+                            checked = autoOn,
+                            onCheckedChange = { v ->
+                                autoOn = v
+                                Updater.setAuto(ctx, v)
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color(0xFF04262B),
+                                checkedTrackColor = Cyan,
+                                uncheckedThumbColor = TextTertiary,
+                                uncheckedTrackColor = Surface2,
+                                uncheckedBorderColor = Line,
+                            )
+                        )
+                    }
+                }
+            }
+            item {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -642,6 +729,9 @@ fun SettingsPage(onOpenPerms: () -> Unit) {
                     Spacer(Modifier.height(10.dp))
                     InfoRow("应用", "王者农场助手")
                     InfoRow("包名", ctx.packageName)
+                    InfoRow("版本", remember(ctx) {
+                        ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: ""
+                    })
                 }
             }
             item {
@@ -679,5 +769,59 @@ private fun InfoRow(label: String, value: String) {
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Text(label, color = TextSecondary, fontSize = 13.sp, modifier = Modifier.width(64.dp))
         Text(value, color = TextPrimary, fontSize = 13.sp)
+    }
+}
+
+/**
+ * 发现新版本的顶部小横幅：非模态，盖在页面最上沿，
+ * 不遮挡屏幕中央、不打断正在执行的任务；用户点「稍后」只留红点。
+ */
+@Composable
+fun UpdateBanner() {
+    val ctx = LocalContext.current
+    AnimatedVisibility(
+        visible = Updater.bannerTag != null,
+        enter = slideInVertically(tween(240)) { -it } + fadeIn(tween(240)),
+        exit = slideOutVertically(tween(200)) { -it } + fadeOut(tween(200)),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 8.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(Surface2)
+                .border(1.dp, Line, RoundedCornerShape(14.dp))
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "发现新版本 ${Updater.bannerTag ?: ""}",
+                    color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium
+                )
+                val s = Updater.status
+                if (s.isNotBlank()) {
+                    Text(s, color = TextSecondary, fontSize = 12.sp)
+                }
+            }
+            Text(
+                "稍后",
+                color = TextTertiary, fontSize = 13.sp,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { Updater.dismissBanner() }
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+            Text(
+                "立即更新",
+                color = Cyan, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable {
+                        if (Updater.install(ctx)) Updater.dismissBanner()
+                    }
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+        }
     }
 }
