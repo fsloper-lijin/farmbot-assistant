@@ -63,6 +63,20 @@ class CmdReceiver : BroadcastReceiver() {
 
                 "com.farmbot.assistant.CMD_PING" -> IO.log(ctx, TAG, "pong ready=${BotService.isReady}")
 
+                "com.farmbot.assistant.CMD_POPUPS" ->
+                    com.farmbot.assistant.bot.ClosePopupFlow.start(
+                        ctx,
+                        status = { IO.log(ctx, TAG, "popups status $it") },
+                        done = { IO.log(ctx, TAG, "popups done: $it") },
+                    )
+
+                "com.farmbot.assistant.CMD_FARM" ->
+                    com.farmbot.assistant.bot.EnterFarmFlow.start(
+                        ctx,
+                        status = { IO.log(ctx, TAG, "farm status $it") },
+                        done = { IO.log(ctx, TAG, "farm done: $it") },
+                    )
+
                 "com.farmbot.assistant.CMD_NODES" -> {
                     val txt = File(IO.dir(ctx, "debug"), "nodes.txt")
                     txt.writeText(com.farmbot.assistant.bot.Nodes.allWindowsDump())
