@@ -8,12 +8,14 @@ import com.farmbot.assistant.ocr.Ocr
 import com.farmbot.assistant.perm.Perms
 
 /**
- * 进入王者农场：大厅左下「王者农场」按钮（模式行：王者农场/对战/排位/玩法大厅）→ 点击 →
+ * 进入王者农场：大厅左下「王者农场」按钮 → 点文字左侧的菠萝图标 →
  * 等模式行消失 = 已进入（加载过渡也算离开大厅）。
  *
- * 按钮行真机实测 y≈0.80h、x≈0.24w；聊天栏在 y≈0.90h 且玩家常聊到「王者农场」，
- * 用 y<0.87h + x<0.45w 双门闩挡掉聊天行；悬浮窗文案不得含「王者农场」（按它找行）。
- * 游戏是 Unity 自绘，全程截图 + OCR 文字框中心点击，坐标不写死像素。
+ * 「王者农场」下方紧贴 HOMESTEAD 小字（英文 OCR 稳，美术字对战/排位时有时无），
+ * 要求两行同排（差 <0.04h）才认按钮：顺带排除正上方 0.10h 的斗地主悬浮入口和
+ * 聊天行，也规避了旧的「nav-0.17h」行距常量随游戏布局漂移导致永远等不到按钮的问题。
+ * 悬浮窗文案不得含「王者农场」（按它找行）。
+ * 游戏是 Unity 自绘，全程截图 + OCR 定位，坐标不写死像素。
  */
 object EnterFarmFlow {
 
@@ -179,12 +181,19 @@ object EnterFarmFlow {
             gone = 0
         }
 
+        // 同排确认：「王者农场」正下方紧贴的 HOMESTEAD 小字（英文 OCR 稳定）。
+        // 斗地主悬浮入口在按钮正上方 0.10h、x 几乎重合，OCR 框抖动时只有这条
+        // 局部行距能把假「王者农场」行挡掉（旧的「nav-0.17h」常量已随布局漂移失效）。
+        val homeY = lines.firstOrNull {
+            it.text.replace(WS, "").uppercase().contains("HOMEST")
+        }?.box?.centerY()
+
         val button = lines.firstOrNull {
             val t = it.text.replace(WS, "")
             t.contains("王者农场") &&
-                it.box.centerY() > bmp.height * 0.70f &&
-                it.box.centerY() < bmp.height * 0.87f &&
-                it.box.centerX() < bmp.width * 0.45f
+                !t.contains("斗地主") &&
+                homeY != null &&
+                kotlin.math.abs(it.box.centerY() - homeY) < bmp.height * 0.04f
         }
         if (button == null) {
             if (frames % 4 == 1) {
@@ -195,6 +204,11 @@ object EnterFarmFlow {
                             .take(6).joinToString(" | ") { it.text }
                 )
             }
+            tick(ctx)
+            return
+        }
+        // 模式行已开始消失（切场景中）就不再补枪，避免在过场画面上乱点
+        if (gone > 0) {
             tick(ctx)
             return
         }
@@ -209,8 +223,10 @@ object EnterFarmFlow {
         lastTapAt = now
         taps++
         gone = 0
-        IO.log(ctx, TAG, "点击 王者农场 (${button.box.centerX()},${button.box.centerY()}) 第 $taps 次 :: ${button.text}")
-        BotService.tap(button.box.centerX(), button.box.centerY())
+        // 点文字左侧的菠萝图标（按钮真实点击区，比点文字成功率高）
+        val tapX = (button.box.left - button.box.height() * 0.6f).toInt()
+        IO.log(ctx, TAG, "点击 菠萝 ($tapX,${button.box.centerY()}) 第 $taps 次 :: ${button.text}")
+        BotService.tap(tapX, button.box.centerY())
         // 文案不得含「王者农场」：按钮判定按它找行，写进去会把悬浮窗自己点掉
         statusCb("正在进入农场…")
         tick(ctx)

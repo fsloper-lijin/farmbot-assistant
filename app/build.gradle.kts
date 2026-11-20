@@ -12,8 +12,9 @@ android {
         applicationId = "com.farmbot.assistant"
         minSdk = 30
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.2.1"
+        versionCode = 4
+        versionName = "0.2.2"
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     buildFeatures {
@@ -22,7 +23,13 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8：裁剪未引用的类/方法 + 优化 + 混淆；资源同步裁剪
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
 
@@ -46,4 +53,5 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.2")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
+    implementation("org.opencv:opencv:4.13.0")
 }

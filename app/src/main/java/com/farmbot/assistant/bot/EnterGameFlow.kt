@@ -20,7 +20,8 @@ import com.farmbot.assistant.perm.Perms
  * - 双方都没有区号 → 抢先服（灰度测试区，如「微信王者抢先服」）→ 比「抢先服」+ 登录前缀（手Q/微信）。
  * - 当前区服读不到时不硬猜：等几帧，仍读不到就直接开换区按目标绝对定位选区（选区不依赖当前区）。
  *
- * 换区面板里选中目标行后，面板可能自动关闭、也可能要再点左上返回箭头，两种都兜住；
+ * 换区面板选中行后面板自动关闭；1.5s 没关就当没点上重新点行，放弃前也点一个区服行关掉面板
+ * （D 形返回箭头是图片坐标点击，实测关不掉面板，退出只走「点区服行」）；
  * 回到开始游戏页后核对当前区确实变成目标区，才点「开始游戏」。
  * 游戏是 Unity 自绘，节点树为空，全程截图 + OCR + 文字框中心 / 比例坐标点击。
  */
@@ -42,12 +43,12 @@ object EnterGameFlow {
      * 要容忍 OCR 偶发把目标行读花（游戏花体字），也给翻页留出时间；按 1.6s/帧 ≈ 13s。
      */
     private const val MAX_MISS_FRAMES = 8
-    /** 换区面板左上角返回箭头比例位置（LoginFlow 同款：x 固定比例，y 跟标题走） */
-    private const val BACK_RX = 0.10f
-    private const val BACK_RY = 0.067f
 
     /** 大厅/面板通用区服行：抢先服没有区号，必须单独放行 */
     private val SERVER_RE = Regex("(手Q|微信)\\s*(王者)?\\s*(抢先服|\\d+\\s*区)")
+    /** OCR 会在「手Q」中间插噪（实测「手チQ394区…」整行被前缀过滤掉），匹配前归一成「手Q」 */
+    private val Q_NOISE = Regex("手.{0,2}?Q")
+    private fun norm(text: String) = text.replace(Q_NOISE, "手Q")
     /** 区号：先归一 OCR 字母混淆再取「数字+区」 */
     private val ZONE_NO_RE = Regex("(\\d+)\\s*区")
     private val WS = Regex("\\s+")
@@ -70,9 +71,8 @@ object EnterGameFlow {
     /** 大厅「换区」按钮连续读不到的帧数 */
     private var changeMisses = 0
     private var changeTaps = 0
-    /** 点过换区面板里的目标行的时间；>0 表示行已点过，等面板关闭或补点返回 */
+    /** 点过换区面板里的目标行的时间；>0 表示行已点过，等面板关闭（没关就重新点行） */
     private var rowTappedAt = 0L
-    private var backTaps = 0
     /** 点过「开始游戏」的时间；>0 表示在等页面离开 */
     private var startTappedAt = 0L
     private var startTaps = 0
@@ -80,8 +80,14 @@ object EnterGameFlow {
     /** 面板里连续「有区服行但没目标行」的帧数 */
     private var missFrames = 0
 
-    fun start(ctx: Context, acc: Account, status: (String) -> Unit, done: (String) -> Unit) {
-        val t = acc.activeFarms.firstOrNull()
+    fun start(
+        ctx: Context,
+        acc: Account,
+        farm: Farm? = null,
+        status: (String) -> Unit,
+        done: (String) -> Unit,
+    ) {
+        val t = farm ?: acc.activeFarms.firstOrNull()
         if (t == null) {
             done("「${acc.name.ifBlank { "账号" }}」没有勾选需要处理的区服")
             return
@@ -105,7 +111,6 @@ object EnterGameFlow {
         changeMisses = 0
         changeTaps = 0
         rowTappedAt = 0L
-        backTaps = 0
         startTappedAt = 0L
         startTaps = 0
         scrolls = 0
@@ -224,7 +229,7 @@ object EnterGameFlow {
             tick(ctx)
             return
         }
-        val cur = lines.firstOrNull { SERVER_RE.containsMatchIn(it.text) }
+        val cur = lines.firstOrNull { SERVER_RE.containsMatchIn(norm(it.text)) }
         val same = cur != null && sameServer(cur.text, t.server)
         IO.log(ctx, TAG, "大厅 当前区服=${cur?.text} 目标=${t.server} 同区=$same")
 
@@ -287,7 +292,6 @@ object EnterGameFlow {
         changeTaps++
         // 每次重开换区都把面板侧状态清零，避免上一轮的点选痕迹影响这一轮
         rowTappedAt = 0L
-        backTaps = 0
         scrolls = 0
         missFrames = 0
         IO.log(ctx, TAG, "点击 换区 (${changeBtn.box.centerX()},${changeBtn.box.centerY()}) 第 $changeTaps 次")
@@ -306,23 +310,14 @@ object EnterGameFlow {
         now: Long,
         cool: Long,
     ) {
-        // 已点过目标行：面板还开着就补点左上返回箭头，关掉了就交给大厅帧核对区服
+        // 已点过目标行：关掉了就交给大厅帧核对区服；超过 1.5s 还开着 = 没点上，重新点行
         if (rowTappedAt > 0) {
             if (now - rowTappedAt < 1500) {
                 tick(ctx)
                 return
             }
-            if (backTaps < 2) {
-                backTaps++
-                lastTapAt = now
-                tapBack(ctx, w, h, lines)
-                tick(ctx)
-                return
-            }
-            // 返回也点过、面板还在：当这次选择没生效，重新找行
-            IO.log(ctx, TAG, "点选后仍停在面板，重置重新选区")
+            IO.log(ctx, TAG, "点选后面板未关闭，重新选区")
             rowTappedAt = 0L
-            backTaps = 0
         }
 
         // 面板里的区服行。行首（去掉 ◆ 装饰后）必须是 手Q/微信：SERVER_RE 只保证行内出现区名，
@@ -330,8 +325,8 @@ object EnterGameFlow {
         // （实测点中悬浮窗直接返回了助手）。侧栏标签（我的服务器 / 1区-10区…）行首不是
         // 手Q/微信，同样被这条过滤掉，不再需要按坐标划分区域 —— 两列网格左列中心只有 0.25w。
         val rows = lines.filter {
-            val plain = it.text.replace(LEADING_JUNK, "")
-            SERVER_RE.containsMatchIn(it.text) &&
+            val plain = norm(it.text.replace(LEADING_JUNK, ""))
+            SERVER_RE.containsMatchIn(plain) &&
                 (plain.startsWith("手Q") || plain.startsWith("微信"))
         }
         val hit = rows.firstOrNull { sameServer(it.text, t.server) }
@@ -365,6 +360,11 @@ object EnterGameFlow {
                 ctx, TAG,
                 "没找到目标行，可见行=${rows.joinToString { "${it.text}@x=${it.box.centerX()}" }}"
             )
+            // 放弃前随便点个区服行：点行即选中并自动关闭面板，不把选区页留在屏幕上
+            rows.firstOrNull()?.let {
+                IO.log(ctx, TAG, "放弃前点行关面板 (${it.box.centerX()},${it.box.centerY()}) :: ${it.text}")
+                BotService.tap(it.box.centerX(), it.box.centerY())
+            }
             finish("「选择服务器」里没找到「${t.server}」，请确认该账号勾选的区服已同步")
             return
         }
@@ -384,30 +384,6 @@ object EnterGameFlow {
         // 文案避开区服名（会命中面板行过滤被自己点掉）
         statusCb("正在查找目标区服…")
         tick(ctx)
-    }
-
-    /**
-     * 从换区面板回开始游戏页。返回箭头是图片没有文字，只能点坐标：
-     * x 用固定比例，y 跟着「选择服务器」标题走 —— 平板 21:9 上下黑边把 UI 整体下移，
-     * 写死 0.067h 会点进黑边（LoginFlow 同款逻辑，游戏不吃系统返回键）。
-     */
-    private fun tapBack(ctx: Context, w: Int, h: Int, lines: List<Ocr.ScanLine>) {
-        val x = (w * BACK_RX).toInt()
-        // 面板标题 OCR 常把「服务器」读错一个字，只认前三个字
-        val title = lines.firstOrNull { it.text.contains("选择服") }
-        // 标题没读到时，用左侧「我的服务器 / 推荐服务器」第一行估算标题行（往上约 0.072H）
-        val sidebar = lines
-            .filter {
-                (it.text.contains("我的服") || it.text.contains("推荐服")) && it.box.left < w * 0.4f
-            }
-            .minByOrNull { it.box.top }
-        val y = when {
-            title != null -> title.box.centerY()
-            sidebar != null -> (sidebar.box.top - h * 0.072f).toInt().coerceAtLeast(0)
-            else -> (h * BACK_RY).toInt()
-        }
-        IO.log(ctx, TAG, "点击 返回箭头 ($x,$y)")
-        BotService.tap(x, y)
     }
 
     // ------------------------------------------------------------------
@@ -432,8 +408,8 @@ object EnterGameFlow {
      * - 都没有区号 → 抢先服：登录前缀（手Q/微信）都能读出来时必须一致，且双方都含「抢先服」。
      */
     private fun sameServer(cur: String, target: String): Boolean {
-        val c = cur.replace(LEADING_JUNK, "").replace(WS, "")
-        val tg = target.replace(LEADING_JUNK, "").replace(WS, "")
+        val c = norm(cur.replace(LEADING_JUNK, "").replace(WS, ""))
+        val tg = norm(target.replace(LEADING_JUNK, "").replace(WS, ""))
         val cn = serverNo(c)
         val tn = serverNo(tg)
         if (cn != null && tn != null) return cn == tn

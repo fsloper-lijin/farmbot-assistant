@@ -33,6 +33,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -59,6 +62,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
@@ -221,7 +225,7 @@ private fun PageHeader(title: String, subtitle: String, trailing: (@Composable (
 private data class Rule(val key: String, val title: String, val desc: String)
 
 private val RULES = listOf(
-    Rule("rule_harvest", "一键务农", "一键种植、一键浇水、一键收获"),
+    Rule("rule_harvest", "一键务农", "一键浇水、一键收获、一键种植"),
     Rule("rule_plant", "补种空地块", "有空地时自动选种子播种"),
     Rule("rule_water", "浇水", "给缺水的地块浇水"),
     Rule("rule_weed", "除草除虫", "出现杂草/虫害时及时处理"),
@@ -233,9 +237,95 @@ private val RULES = listOf(
 private data class HarvestPart(val key: String, val title: String, val desc: String)
 
 private val HARVEST_PARTS = listOf(
-    HarvestPart("rule_harvest_plant", "一键种植", "空地上自动选种子播种"),
     HarvestPart("rule_harvest_water", "一键浇水", "给缺水的地块自动浇水"),
     HarvestPart("rule_harvest_reap", "一键收获", "成熟作物一键收取"),
+    HarvestPart("rule_harvest_plant", "一键种植", "空地上自动选种子播种"),
+)
+
+/** 规则是否真的会执行任务：一键务农必须至少开一个子功能，否则开了也没事可做 */
+internal fun ruleActive(checked: Map<String, Boolean>, key: String): Boolean {
+    if (checked[key] != true) return false
+    if (key == "rule_harvest") return HARVEST_PARTS.any { checked[it.key] == true }
+    return true
+}
+
+/** 从 prefs 读原始开关：规则页全关、或一键务农三个子功能全关，都算没有任务 */
+internal fun anyRuleActive(p: android.content.SharedPreferences): Boolean {
+    val checked = RULES.associate { it.key to p.getBoolean(it.key, false) } +
+        HARVEST_PARTS.associate { it.key to p.getBoolean(it.key, false) }
+    return RULES.any { ruleActive(checked, it.key) }
+}
+
+/**
+ * 一键种植可选的作物，按游戏「作物列表」的小时分组；16 小时拆成两组：
+ * 香蕉开头那串是高经济作物（16 高），草莓开头那串是普通（16 普）。
+ * 待真机校准：1/8/32 小时的名单取自游戏截图，后续版本新增作物要补进来。
+ */
+private data class CropHour(val id: String, val label: String, val short: String, val crops: List<String>)
+
+private const val CROP_DEFAULT = "默认（当前最高可种）"
+
+/** 一轮种植：小时组 id + 作物名，空 = 默认取当前最高可种；多轮按顺序循环（轮作） */
+private data class Rotation(val hour: String, val crop: String)
+
+private const val ROTATION_KEY = "rule_harvest_crops"
+
+private fun loadRotations(p: android.content.SharedPreferences): List<Rotation> {
+    val raw = p.getString(ROTATION_KEY, "") ?: ""
+    val list = if (raw.isEmpty()) {
+        // 旧版单条设置的兼容
+        val h = p.getString("rule_harvest_crop_hour", "") ?: ""
+        val c = p.getString("rule_harvest_crop", "") ?: ""
+        listOf(Rotation(h, c))
+    } else {
+        raw.split('|').filter { it.isNotEmpty() }.map {
+            val a = it.split(':')
+            Rotation(a.getOrElse(0) { "" }, a.getOrElse(1) { "" })
+        }
+    }
+    return list.ifEmpty { listOf(Rotation("", "")) }
+}
+
+private fun encodeRotations(list: List<Rotation>) =
+    list.joinToString("|") { "${it.hour}:${it.crop}" }
+
+private fun rotLabel(r: Rotation): String {
+    val g = CROP_HOURS.firstOrNull { it.id == r.hour } ?: return CROP_DEFAULT
+    return if (r.crop.isEmpty()) "${g.short}·最高" else "${g.short}·${r.crop}"
+}
+
+private val CROP_HOURS = listOf(
+    CropHour(
+        "h1", "1 小时", "1小时", listOf(
+            "雪莲果", "白菜", "丝瓜", "仙人掌果", "咖啡豆", "树莓", "桑葚", "甘蔗",
+            "四季豆", "莴笋", "洋葱", "白萝卜", "黄瓜", "向日葵", "土豆",
+        )
+    ),
+    CropHour(
+        "h8", "8 小时", "8小时", listOf(
+            "羽衣甘蓝", "番石榴", "花椰菜", "椰子", "火龙果", "芒果", "杏子", "葫芦",
+            "冬瓜", "红枣", "花菜", "葡萄", "茄子", "青椒", "玉米",
+        )
+    ),
+    CropHour(
+        "h16_hi", "16 小时 · 高经济", "16高", listOf(
+            "香蕉", "柚子", "西瓜", "木瓜", "橘子", "杨桃", "柠檬", "枇杷",
+            "山楂", "牛油果", "百合", "洋桔梗", "紫绣球", "鸢尾花", "风信子",
+        )
+    ),
+    CropHour(
+        "h16", "16 小时 · 普通", "16普", listOf(
+            "草莓", "大蒜", "南瓜", "生菜", "花生", "棉花", "李子", "桃子",
+            "哈密瓜", "山竹", "石榴", "荔枝", "蔓越莓", "柿子", "龙眼", "秋葵",
+        )
+    ),
+    CropHour(
+        "h32", "32 小时", "32小时", listOf(
+            "狐尾草", "紫藤萝", "蝴蝶兰", "芍药", "昙花", "生姜", "笋", "龙胆花",
+            "莲花", "灯笼果", "樱桃", "梨子", "菠萝", "荞麦", "猕猴桃", "辣椒",
+            "卷心菜", "蓝莓",
+        )
+    ),
 )
 
 /** 规则页：进入农场之后，每个账号要按什么顺序做什么 */
@@ -245,14 +335,17 @@ fun RulesPage() {
     val prefs = remember { ctx.getSharedPreferences("farmbot", android.content.Context.MODE_PRIVATE) }
     val checked = remember {
         mutableStateMapOf<String, Boolean>().apply {
-            RULES.forEach { put(it.key, prefs.getBoolean(it.key, true)) }
+            RULES.forEach { put(it.key, prefs.getBoolean(it.key, false)) }
+            // 一键务农的子功能也要进这张表：列表上的「N 项」和开始执行前的判断都靠它
+            HARVEST_PARTS.forEach { put(it.key, prefs.getBoolean(it.key, false)) }
         }
     }
     /** 点齿轮进入的详细设置页；null = 停留在规则列表 */
     var detail by remember { mutableStateOf<Rule?>(null) }
     val wide = isWideScreen()
     val pad = if (wide) 28.dp else 18.dp
-    val enabledCount = checked.count { it.value }
+    // 一键务农开了但三个子功能全关，等于没有任务，不算进已启用项
+    val enabledCount = RULES.count { r -> ruleActive(checked, r.key) }
 
     // 系统返回（侧边栏手势/返回键）先退回到规则列表，不要直接退出应用
     BackHandler(enabled = detail != null) { detail = null }
@@ -283,6 +376,7 @@ fun RulesPage() {
                     checked[rule.key] = v
                     prefs.edit().putBoolean(rule.key, v).apply()
                 },
+                onPartToggle = { k, v -> checked[k] = v },
                 onBack = { detail = null },
             )
             return@AnimatedContent
@@ -345,15 +439,15 @@ fun RulesPage() {
                                 uncheckedBorderColor = Line,
                             )
                         )
-                        // 齿轮：进入这一项的详细设置
+                        // 进入这一项的详细设置（齿轮认不出来，直接写字）
                         Box(
                             modifier = Modifier
-                                .size(40.dp)
                                 .clip(RoundedCornerShape(10.dp))
-                                .clickable { detail = rule },
+                                .clickable { detail = rule }
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Canvas(Modifier.size(17.dp)) { drawNavGlyph(3, TextTertiary) }
+                            Text("配置", color = TextTertiary, fontSize = 12.sp)
                         }
                     }
                 }
@@ -368,6 +462,8 @@ private fun RuleDetailPage(
     rule: Rule,
     enabled: Boolean,
     onToggle: (Boolean) -> Unit,
+    /** 子功能开关同步回列表页，退出详情后「N 项」立刻是对的 */
+    onPartToggle: (String, Boolean) -> Unit = { _, _ -> },
     onBack: () -> Unit,
 ) {
     val ctx = LocalContext.current
@@ -378,7 +474,7 @@ private fun RuleDetailPage(
     // 一键务农的三个子功能开关（其它规则用不到）
     val partChecked = remember {
         mutableStateMapOf<String, Boolean>().apply {
-            HARVEST_PARTS.forEach { put(it.key, prefs.getBoolean(it.key, true)) }
+            HARVEST_PARTS.forEach { put(it.key, prefs.getBoolean(it.key, false)) }
         }
     }
     val shape = RoundedCornerShape(16.dp)
@@ -420,35 +516,144 @@ private fun RuleDetailPage(
                 // 一键务农：详情页分成三个功能，各自独立开关
                 items(HARVEST_PARTS, key = { it.key }) { part ->
                     val partOn = partChecked[part.key] ?: true
-                    Row(
+                    val isPlant = part.key == "rule_harvest_plant"
+                    var cropOpen by remember { mutableStateOf(false) }
+                    var rotations by remember { mutableStateOf(loadRotations(prefs)) }
+                    val saveRotations: (List<Rotation>) -> Unit = { list ->
+                        // 至少留一条：删到空等于「默认最高可种」
+                        rotations = list.ifEmpty { listOf(Rotation("", "")) }
+                        prefs.edit()
+                            .putString(ROTATION_KEY, encodeRotations(rotations))
+                            .apply()
+                    }
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(shape)
                             .background(Surface1)
                             .border(1.dp, Line, shape)
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                            .padding(horizontal = 16.dp, vertical = 14.dp)
                     ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(part.title, color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(3.dp))
-                            Text(part.desc, color = TextSecondary, fontSize = 12.sp)
-                        }
-                        Spacer(Modifier.width(12.dp))
-                        Switch(
-                            checked = partOn,
-                            onCheckedChange = { v ->
-                                partChecked[part.key] = v
-                                prefs.edit().putBoolean(part.key, v).apply()
-                            },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color(0xFF04262B),
-                                checkedTrackColor = Cyan,
-                                uncheckedThumbColor = TextTertiary,
-                                uncheckedTrackColor = Surface2,
-                                uncheckedBorderColor = Line,
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(part.title, color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                                Spacer(Modifier.height(3.dp))
+                                Text(part.desc, color = TextSecondary, fontSize = 12.sp)
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Switch(
+                                checked = partOn,
+                                onCheckedChange = { v ->
+                                    partChecked[part.key] = v
+                                    prefs.edit().putBoolean(part.key, v).apply()
+                                    onPartToggle(part.key, v)
+                                },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color(0xFF04262B),
+                                    checkedTrackColor = Cyan,
+                                    uncheckedThumbColor = TextTertiary,
+                                    uncheckedTrackColor = Surface2,
+                                    uncheckedBorderColor = Line,
+                                )
                             )
-                        )
+                        }
+                        // 种植要选种什么：可排多轮轮作（如 16 小时 → 8 小时 → 16 小时…），
+                        // 执行时按顺序循环；一轮不填 = 默认取当前最高可种
+                        if (isPlant) {
+                            val summary = if (rotations.size == 1 && rotations[0].hour.isEmpty()) CROP_DEFAULT
+                            else rotations.joinToString(" → ") { rotLabel(it) }
+                            Row(
+                                modifier = Modifier
+                                    .padding(top = 10.dp)
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(9.dp))
+                                    .background(Surface2)
+                                    .clickable { cropOpen = !cropOpen }
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("轮作", color = TextSecondary, fontSize = 12.sp)
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    summary,
+                                    color = if (rotations.size == 1 && rotations[0].hour.isEmpty()) TextTertiary else Cyan,
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    if (cropOpen) "收起 ▲" else "展开 ▾",
+                                    color = TextSecondary,
+                                    fontSize = 11.sp
+                                )
+                            }
+                            if (cropOpen) {
+                                Spacer(Modifier.height(8.dp))
+                                rotations.forEachIndexed { idx, rot ->
+                                    val group = CROP_HOURS.firstOrNull { it.id == rot.hour }
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            "${idx + 1}",
+                                            color = TextTertiary,
+                                            fontSize = 11.sp,
+                                            modifier = Modifier.width(18.dp)
+                                        )
+                                        PickerRow(
+                                            label = "小时",
+                                            value = group?.short ?: "默认",
+                                            options = listOf("" to "默认") + CROP_HOURS.map { it.id to it.short },
+                                            modifier = Modifier.weight(1f),
+                                        ) { id ->
+                                            saveRotations(rotations.toMutableList().also { it[idx] = Rotation(id, "") })
+                                        }
+                                        Spacer(Modifier.width(6.dp))
+                                        PickerRow(
+                                            label = "作物",
+                                            value = if (rot.crop.isEmpty()) CROP_DEFAULT else rot.crop,
+                                            options = listOf("" to CROP_DEFAULT) +
+                                                (group?.crops ?: emptyList()).map { it to it },
+                                            enabled = group != null,
+                                            modifier = Modifier.weight(1.25f),
+                                        ) { name ->
+                                            saveRotations(rotations.toMutableList().also { it[idx] = rot.copy(crop = name) })
+                                        }
+                                        Spacer(Modifier.width(4.dp))
+                                        Text(
+                                            "✕",
+                                            color = if (rotations.size > 1) TextSecondary else TextTertiary,
+                                            fontSize = 13.sp,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .clickable(enabled = rotations.size > 1) {
+                                                    saveRotations(rotations.filterIndexed { i, _ -> i != idx })
+                                                }
+                                                .padding(horizontal = 6.dp, vertical = 6.dp)
+                                        )
+                                    }
+                                    Spacer(Modifier.height(6.dp))
+                                }
+                                Row(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(9.dp))
+                                        .background(Surface2)
+                                        .clickable { saveRotations(rotations + Rotation("", "")) }
+                                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("＋ 添加一轮", color = Cyan, fontSize = 12.sp)
+                                }
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    "按顺序轮作：收获后下一轮换下一种，循环执行",
+                                    color = TextTertiary,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
                     }
                 }
             } else {
@@ -522,6 +727,59 @@ private fun RuleDetailPage(
     }
 }
 
+/** 一行「标签 值 ▾」，点开是下拉；轮作列表横向排两项（小时 / 作物） */
+@Composable
+private fun PickerRow(
+    label: String,
+    value: String,
+    options: List<Pair<String, String>>,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    onPick: (String) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    Box(modifier) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(9.dp))
+                .background(Surface2)
+                .clickable(enabled = enabled) { open = true }
+                .padding(horizontal = 10.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(label, color = TextSecondary, fontSize = 12.sp, modifier = Modifier.width(30.dp))
+            Spacer(Modifier.width(4.dp))
+            Text(
+                value,
+                color = if (enabled) Cyan else TextTertiary,
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Text("▾", color = if (enabled) TextSecondary else TextTertiary, fontSize = 11.sp)
+        }
+        DropdownMenu(
+            expanded = open && enabled,
+            onDismissRequest = { open = false },
+            shape = RoundedCornerShape(12.dp),
+            containerColor = Surface2,
+            border = BorderStroke(1.dp, Line),
+        ) {
+            options.forEach { (id, text) ->
+                DropdownMenuItem(
+                    text = { Text(text, color = TextPrimary, fontSize = 13.sp) },
+                    onClick = {
+                        onPick(id)
+                        open = false
+                    }
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun StepButton(label: String, onClick: () -> Unit) {
     Box(
@@ -571,14 +829,30 @@ fun LogsPage() {
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         PageHeader("日志", "最近 400 条运行记录 · 自动刷新") {
-            Box(
-                Modifier
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Surface2)
-                    .clickable { refreshKey++ }
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
-            ) {
-                Text("刷新", color = TextSecondary, fontSize = 12.sp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Surface2)
+                        .clickable { refreshKey++ }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text("刷新", color = TextSecondary, fontSize = 12.sp)
+                }
+                Spacer(Modifier.width(8.dp))
+                // 清空 = 截断 bot.log（保留文件本身），IO.log 的追加句柄不受影响
+                Box(
+                    Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Surface2)
+                        .clickable {
+                            runCatching { File(IO.dir(ctx, "logs"), "bot.log").writeText("") }
+                            refreshKey++
+                        }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text("清空", color = TextSecondary, fontSize = 12.sp)
+                }
             }
         }
         Box(
@@ -623,6 +897,7 @@ fun LogsPage() {
 @Composable
 fun SettingsPage(onOpenPerms: () -> Unit) {
     val ctx = LocalContext.current
+    val prefs = remember { ctx.getSharedPreferences("farmbot", android.content.Context.MODE_PRIVATE) }
     val wide = isWideScreen()
     val pad = if (wide) 28.dp else 18.dp
     val shape = RoundedCornerShape(16.dp)
@@ -714,6 +989,43 @@ fun SettingsPage(onOpenPerms: () -> Unit) {
                             )
                         )
                     }
+                }
+            }
+            item {
+                // 屏幕保护：MainActivity 侧 5 分钟没碰屏幕就盖纯黑，这里只管开关
+                var saverOn by remember { mutableStateOf(prefs.getBoolean("screen_saver", false)) }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(shape)
+                        .background(Surface1)
+                        .border(1.dp, Line, shape)
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("屏幕保护", color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            "5 分钟无操作后屏幕变纯黑并保持亮屏，点任意位置恢复",
+                            color = TextSecondary, fontSize = 12.sp
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Switch(
+                        checked = saverOn,
+                        onCheckedChange = { v ->
+                            saverOn = v
+                            prefs.edit().putBoolean("screen_saver", v).apply()
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color(0xFF04262B),
+                            checkedTrackColor = Cyan,
+                            uncheckedThumbColor = TextTertiary,
+                            uncheckedTrackColor = Surface2,
+                            uncheckedBorderColor = Line,
+                        )
+                    )
                 }
             }
             item {

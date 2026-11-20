@@ -39,6 +39,10 @@ _seed/
 # 调试截图
 agreement.png
 /*.png
+# 本机 AI 工具产物与临时截图目录
+.arts/
+_tmp/
+*.idsig
 
 # ---- 系统垃圾 ----
 .DS_Store

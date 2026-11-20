@@ -30,8 +30,8 @@
 
 **本项目由 AI 全程编写**，属于 AI 驱动开发的实验性项目：
 
-- **开发工具**：字节跳动旗下的 AI 编程助手 **Trae**
-- **参与模型**：DeepSeek V4.1 Flash、小米 MiMo V2.6 Flash
+- **开发工具**：字节跳动 Trae、腾讯WorkBuddy，华为CodeArts Agent、OpenCode
+- **参与模型**：DeepSeek V4.1 Flash、小米 MiMo V2.6 Flash、Kimi k3.1 Pro、GLM 5.3 Flash
 - **人工角色**：人类只负责提出需求、审查代码与真机验证，不手写实现
 
 **测试设备均为小米 / 红米，系统均为 HyperOS 4.0：**

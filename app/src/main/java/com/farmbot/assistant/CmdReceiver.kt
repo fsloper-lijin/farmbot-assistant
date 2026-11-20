@@ -77,6 +77,76 @@ class CmdReceiver : BroadcastReceiver() {
                         done = { IO.log(ctx, TAG, "farm done: $it") },
                     )
 
+                "com.farmbot.assistant.CMD_EXITFARM" ->
+                    com.farmbot.assistant.bot.ExitFarmFlow.start(
+                        ctx,
+                        status = { IO.log(ctx, TAG, "exitfarm status $it") },
+                        done = { IO.log(ctx, TAG, "exitfarm done: $it") },
+                    )
+
+                "com.farmbot.assistant.CMD_CROP" ->
+                    com.farmbot.assistant.bot.CropPickFlow.start(
+                        ctx,
+                        intent.getStringExtra("hour") ?: "",
+                        intent.getStringExtra("crop") ?: "",
+                        status = { IO.log(ctx, TAG, "crop status $it") },
+                        done = { IO.log(ctx, TAG, "crop done: $it") },
+                    )
+
+                "com.farmbot.assistant.CMD_HARVEST" ->
+                    com.farmbot.assistant.bot.HarvestSetupFlow.start(
+                        ctx,
+                        status = { IO.log(ctx, TAG, "harvest status $it") },
+                        done = { IO.log(ctx, TAG, "harvest done: $it") },
+                    )
+
+                "com.farmbot.assistant.CMD_WATER" ->
+                    com.farmbot.assistant.bot.FarmWaterFlow.start(
+                        ctx,
+                        status = { IO.log(ctx, TAG, "water status $it") },
+                        done = { IO.log(ctx, TAG, "water done: $it") },
+                    )
+
+                "com.farmbot.assistant.CMD_LAND" ->
+                    com.farmbot.assistant.bot.LandScanFlow.start(
+                        ctx,
+                        status = { IO.log(ctx, TAG, "land status $it") },
+                        done = { IO.log(ctx, TAG, "land done: $it") },
+                    )
+
+                "com.farmbot.assistant.CMD_SELECT" ->
+                    com.farmbot.assistant.bot.ReturnToSelectFlow.start(
+                        ctx,
+                        status = { IO.log(ctx, TAG, "select status $it") },
+                        done = { IO.log(ctx, TAG, "select done: $it") },
+                    )
+
+                // 调试：跳过登录链直接进区服（--es server 指定区服名，缺省取第一个勾选区）
+                "com.farmbot.assistant.CMD_ENTER" -> {
+                    val acc = com.farmbot.assistant.data.AccountStore(ctx)
+                        .load().firstOrNull { it.activeFarms.isNotEmpty() }
+                    val fs = acc?.activeFarms.orEmpty()
+                    val farm = fs.firstOrNull { it.server == intent.getStringExtra("server") }
+                        ?: fs.firstOrNull()
+                    if (acc == null || farm == null) {
+                        IO.log(ctx, TAG, "enter: 没有勾选区服的账号")
+                    } else {
+                        com.farmbot.assistant.bot.EnterGameFlow.start(
+                            ctx, acc, farm,
+                            status = { IO.log(ctx, TAG, "enter status $it") },
+                            done = { IO.log(ctx, TAG, "enter done: $it") },
+                        )
+                    }
+                }
+
+                "com.farmbot.assistant.CMD_WALK" ->
+                    com.farmbot.assistant.bot.FarmWalkFlow.start(
+                        ctx,
+                        status = { IO.log(ctx, TAG, "walk status $it") },
+                        done = { IO.log(ctx, TAG, "walk done: $it") },
+                        openSettings = intent.getBooleanExtra("settings", true),
+                    )
+
                 "com.farmbot.assistant.CMD_NODES" -> {
                     val txt = File(IO.dir(ctx, "debug"), "nodes.txt")
                     txt.writeText(com.farmbot.assistant.bot.Nodes.allWindowsDump())

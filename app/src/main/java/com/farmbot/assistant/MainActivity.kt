@@ -1,10 +1,16 @@
 package com.farmbot.assistant
 
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.os.Bundle
+import android.view.MotionEvent
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -20,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -28,14 +35,25 @@ import com.farmbot.assistant.bot.BotService
 import com.farmbot.assistant.bot.ClosePopupFlow
 import com.farmbot.assistant.bot.EnterFarmFlow
 import com.farmbot.assistant.bot.EnterGameFlow
+import com.farmbot.assistant.bot.ExitFarmFlow
+import com.farmbot.assistant.bot.ReturnToSelectFlow
+import com.farmbot.assistant.bot.FarmWaterFlow
+import com.farmbot.assistant.bot.FarmWalkFlow
+import com.farmbot.assistant.bot.HarvestSetupFlow
+import com.farmbot.assistant.bot.LandScanFlow
 import com.farmbot.assistant.bot.FlowControl
 import com.farmbot.assistant.bot.LoginFlow
 import com.farmbot.assistant.core.IO
 import com.farmbot.assistant.data.Account
 import com.farmbot.assistant.data.AccountStore
+import com.farmbot.assistant.data.Farm
 import com.farmbot.assistant.data.LoginType
+import com.farmbot.assistant.data.mergeAccounts
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import com.farmbot.assistant.overlay.FloatingOverlay
 import com.farmbot.assistant.perm.Perms
 import com.farmbot.assistant.ui.AccountScreen
@@ -73,12 +91,17 @@ class MainActivity : ComponentActivity() {
     private val alarmRemain = mutableStateOf(0L)
     /** 多账号串行队列是否在跑：账号与账号之间有空档，不能只看 FlowControl.running */
     private val queueRunning = mutableStateOf(false)
+    /** 屏幕保护的纯黑遮罩是否正在显示 */
+    private val saverBlack = mutableStateOf(false)
+    /** 最后一次碰屏幕的时间：屏幕保护的 5 分钟空闲计时基准 */
+    private var lastTouchAt = System.currentTimeMillis()
     private lateinit var store: AccountStore
     /** 「已进入过账号管理」标志，落盘后启动直达账号页 */
     private val prefs by lazy { getSharedPreferences("farmbot", MODE_PRIVATE) }
 
     private companion object {
         const val KEY_ENTERED = "entered_account_management"
+        const val KEY_SAVER = "screen_saver"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -109,9 +132,70 @@ class MainActivity : ComponentActivity() {
                 // 点过一次「进入账号管理」后就不再自动回到权限页；只有无障碍服务掉了才强制显示
                 var showPerms by remember { mutableStateOf(!prefs.getBoolean(KEY_ENTERED, false)) }
 
+                // 屏幕保护：开关开着时强制不息屏；5 分钟没碰屏幕 → 盖纯黑（点任意处恢复）
+                var saverOn by remember { mutableStateOf(prefs.getBoolean(KEY_SAVER, false)) }
+                LaunchedEffect(Unit) {
+                    while (true) {
+                        delay(3000)
+                        saverOn = prefs.getBoolean(KEY_SAVER, false)
+                        saverBlack.value = saverOn &&
+                            System.currentTimeMillis() - lastTouchAt >= 5 * 60_000L
+                    }
+                }
+                LaunchedEffect(saverOn) {
+                    if (saverOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+                LaunchedEffect(saverBlack.value) {
+                    val ctl = WindowCompat.getInsetsController(window, window.decorView)
+                    if (saverBlack.value) {
+                        // 纯黑要盖满整屏：藏系统栏 + 收掉执行中的悬浮窗状态字
+                        FloatingOverlay.hide(this@MainActivity)
+                        ctl.hide(WindowInsetsCompat.Type.systemBars())
+                    } else {
+                        ctl.show(WindowInsetsCompat.Type.systemBars())
+                    }
+                }
+
                 fun update(next: List<Account>) {
                     accounts = next
                     store.save(next)
+                }
+
+                // 导出：系统文件选择器里选保存位置，写入账号 + 区服 + 勾选状态
+                val exportLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.CreateDocument("application/json")
+                ) { uri ->
+                    if (uri == null) return@rememberLauncherForActivityResult
+                    val ok = runCatching {
+                        contentResolver.openOutputStream(uri)?.use {
+                            it.write(store.toJson(accounts).toByteArray(Charsets.UTF_8))
+                        } ?: error("无法写入")
+                    }.isSuccess
+                    toast(if (ok) "已导出 ${accounts.size} 个账号" else "导出失败，换个位置再试")
+                }
+                // 导入：选备份文件，按登录方式 + QQ 号/昵称合并，只补缺的账号和区服
+                val importLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.OpenDocument()
+                ) { uri ->
+                    if (uri == null) return@rememberLauncherForActivityResult
+                    val text = runCatching {
+                        contentResolver.openInputStream(uri)?.use {
+                            it.readBytes().toString(Charsets.UTF_8)
+                        }
+                    }.getOrNull()
+                    val list = text?.let { store.parseJson(it) }
+                    if (list == null) {
+                        toast("文件格式不对，未导入")
+                    } else {
+                        val merged = mergeAccounts(accounts, list)
+                        if (merged.addedAccounts == 0 && merged.addedFarms == 0) {
+                            toast("没有新的账号或区服")
+                        } else {
+                            update(merged.accounts)
+                            toast("已导入 ${merged.addedAccounts} 个账号、${merged.addedFarms} 个区服")
+                        }
+                    }
                 }
 
                 /** 发现到的 QQ 号是否就是已有卡片：优先比 QQ 昵称，没学过昵称时用身份名交集兜底 */
@@ -137,6 +221,8 @@ class MainActivity : ComponentActivity() {
                         queueRunning.value = false
                         FloatingOverlay.setText("区服同步完成")
                         toast("区服同步完成")
+                        // 同步全程都在游戏里跑，结束后把农场助手拉回前台
+                        bringAppToFront()
                         window.decorView.postDelayed(
                             { FloatingOverlay.hide(this@MainActivity) }, 3000
                         )
@@ -247,62 +333,8 @@ class MainActivity : ComponentActivity() {
                                 )
                                 return@startAuto
                             }
-                            EnterGameFlow.start(
-                                this@MainActivity,
-                                updated,
-                                status = { FloatingOverlay.setText(it) },
-                                done = { m ->
-                                    if (FlowControl.cancelEpoch != epoch) {
-                                        queueRunning.value = false
-                                        return@start
-                                    }
-                                    // 进游戏成功 → 接着清理游戏内弹窗；没进去就停链
-                                    if (m.startsWith("已进入")) {
-                                        ClosePopupFlow.start(
-                                            this@MainActivity,
-                                            status = { FloatingOverlay.setText(it) },
-                                            done = { m2 ->
-                                                if (FlowControl.cancelEpoch != epoch) {
-                                                    queueRunning.value = false
-                                                    return@start
-                                                }
-                                                // 弹窗清完（两种收尾文案都以「游戏内」开头）→ 接着进农场；
-                                                // 超时/停止等失败文案不进农场
-                                                if (m2.startsWith("游戏内")) {
-                                                    EnterFarmFlow.start(
-                                                        this@MainActivity,
-                                                        status = { FloatingOverlay.setText(it) },
-                                                        done = { m3 ->
-                                                            queueRunning.value = false
-                                                            if (FlowControl.cancelEpoch == epoch) {
-                                                                FloatingOverlay.setText(m3)
-                                                                toast(m3)
-                                                                window.decorView.postDelayed(
-                                                                    { FloatingOverlay.hide(this@MainActivity) }, 4000
-                                                                )
-                                                            }
-                                                        },
-                                                    )
-                                                } else {
-                                                    queueRunning.value = false
-                                                    FloatingOverlay.setText(m2)
-                                                    toast(m2)
-                                                    window.decorView.postDelayed(
-                                                        { FloatingOverlay.hide(this@MainActivity) }, 4000
-                                                    )
-                                                }
-                                            },
-                                        )
-                                    } else {
-                                        queueRunning.value = false
-                                        FloatingOverlay.setText(m)
-                                        toast(m)
-                                        window.decorView.postDelayed(
-                                            { FloatingOverlay.hide(this@MainActivity) }, 4000
-                                        )
-                                    }
-                                },
-                            )
+                            // 登录成功 → 逐个区服执行：进游戏 → 清弹窗 → 进农场 → 走到雕塑 → 设置 → 一键浇水
+                            beginZoneLoop(updated, epoch)
                         },
                         excludeQq = takenQq,
                         // 日常执行只登录不抓区服：区服数据由「同步区服」维护
@@ -413,6 +445,18 @@ class MainActivity : ComponentActivity() {
                     )
                 } else {
                     var tab by remember { mutableStateOf(0) }
+                    // 返回手势：非农场页先回农场页；农场页要连按两次才退出，避免误触杀掉正在跑的任务
+                    var lastBackAt by remember { mutableLongStateOf(0L) }
+                    BackHandler {
+                        when {
+                            tab != 0 -> tab = 0
+                            System.currentTimeMillis() - lastBackAt < 2000L -> finish()
+                            else -> {
+                                lastBackAt = System.currentTimeMillis()
+                                toast("再按一次返回退出")
+                            }
+                        }
+                    }
                     // 刚新建的账号卡 id：只让它播放入场动画，动画结束就清掉，切 Tab 回来不会再弹一次
                     var justAddedId by remember { mutableStateOf<String?>(null) }
                     LaunchedEffect(justAddedId) {
@@ -465,10 +509,6 @@ class MainActivity : ComponentActivity() {
                                 list.add(to, list.removeAt(from))
                                 update(list)
                             }
-                        },
-                        onOpenPerms = {
-                            showPerms = true
-                            refreshPerms()
                         },
                         justAddedId = justAddedId,
                         // 开始执行：登录第一个有勾选区服的账号 → 识别/换区 → 点开始游戏
@@ -532,6 +572,13 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         running = FlowControl.running.value || queueRunning.value,
+                        onImport = { importLauncher.launch(arrayOf("*/*")) },
+                        onExport = {
+                            val name = "farmbot-accounts-" +
+                                java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US)
+                                    .format(java.util.Date()) + ".json"
+                            exportLauncher.launch(name)
+                        },
                         onStop = {
                             // 强制停止：作废所有在跑循环的 token，收起悬浮窗状态层
                             IO.log(this@MainActivity, "Stop", "用户强制停止自动化${FlowControl.label.value.let { if (it.isEmpty()) "" else "（$it）" }}")
@@ -559,9 +606,22 @@ class MainActivity : ComponentActivity() {
                 }
                 // 新版本提示：盖在最上沿的非模态小横幅，不打断、不遮挡执行中的任务
                 Box(Modifier.fillMaxWidth().align(Alignment.TopCenter)) { UpdateBanner() }
+                // 屏幕保护：纯黑盖住一切，碰一下屏幕（dispatchTouchEvent）就恢复
+                if (saverBlack.value) {
+                    Box(Modifier.fillMaxSize().background(Color.Black))
+                }
                 }
             }
         }
+    }
+
+    /** 自动化跑完把农场助手拉回前台；悬浮窗权限已具备，后台启动自己的 Activity 不会被系统拦 */
+    private fun bringAppToFront() {
+        startActivity(
+            Intent(this, MainActivity::class.java).addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+            )
+        )
     }
 
     /** 与系统时钟里那条闹钟对齐（从后台回来时刷新倒计时） */
@@ -569,8 +629,252 @@ class MainActivity : ComponentActivity() {
         alarmAt.value = SystemAlarm.pendingAt(this)
     }
 
+    /** 本轮要处理的区服（串行）；第一个区从当前开始页进，后面每个区都冷重启回开始页再换区 */
+    private val zoneQueue = mutableListOf<Farm>()
+    private var zoneAcc: Account? = null
+    /** 当前执行中的区；失败恢复回选服时要用 */
+    private var zoneFarm: Farm? = null
+    /** 每个区的失败恢复次数，超限才真正终止报错 */
+    private var zoneTries = 0
+
+    private fun beginZoneLoop(acc: Account, epoch: Int) {
+        zoneAcc = acc
+        zoneQueue.clear()
+        zoneQueue.addAll(acc.activeFarms)
+        IO.log(this, "Zone", "本账号勾选了 ${zoneQueue.size} 个区服")
+        nextZone(epoch, first = true)
+    }
+
+    private fun nextZone(epoch: Int, first: Boolean) {
+        if (!zoneAlive(epoch)) return
+        val acc = zoneAcc
+        val farm = zoneQueue.removeFirstOrNull()
+        if (acc == null || farm == null) {
+            // 全处理完 → 退出农场回大厅收工
+            exitAndFinish(epoch)
+            return
+        }
+        zoneFarm = farm
+        zoneTries = 0
+        IO.log(this, "Zone", "处理区服「${farm.title}」剩余 ${zoneQueue.size} 个")
+        if (first) {
+            enterZone(acc, farm, epoch)
+        } else {
+            switchZone(acc, farm, epoch)
+        }
+    }
+
+    /** 队列收尾：退出农场回大厅；失败走恢复重试，不直接终止 */
+    private fun exitAndFinish(epoch: Int) {
+        ExitFarmFlow.start(
+            this,
+            status = { FloatingOverlay.setText(it) },
+            done = { m ->
+                if (!zoneAlive(epoch)) return@start
+                if (m.startsWith("已退出")) endChain("全部区服已处理完")
+                else zoneRetry(m) { exitAndFinish(epoch) }
+            },
+        )
+    }
+
+    /** 换区：先退农场回大厅，再「齿轮 → 退出登录」回到选区页，不杀游戏；哪步失败重试哪步 */
+    private fun switchZone(acc: Account, farm: Farm, epoch: Int) {
+        ExitFarmFlow.start(
+            this,
+            status = { FloatingOverlay.setText(it) },
+            done = { m ->
+                if (!zoneAlive(epoch)) return@start
+                if (!m.startsWith("已退出")) {
+                    zoneRetry(m) { switchZone(acc, farm, epoch) }
+                    return@start
+                }
+                returnToSelect(acc, farm, epoch)
+            },
+        )
+    }
+
+    private fun returnToSelect(acc: Account, farm: Farm, epoch: Int) {
+        ReturnToSelectFlow.start(
+            this,
+            status = { FloatingOverlay.setText(it) },
+            done = { m ->
+                if (!zoneAlive(epoch)) return@start
+                if (m.startsWith("已回到选区")) enterZone(acc, farm, epoch)
+                else zoneRetry(m) { returnToSelect(acc, farm, epoch) }
+            },
+        )
+    }
+
+    private fun enterZone(acc: Account, farm: Farm, epoch: Int) {
+        EnterGameFlow.start(
+            this,
+            acc,
+            farm,
+            status = { FloatingOverlay.setText(it) },
+            done = { m ->
+                if (!zoneAlive(epoch)) return@start
+                if (!m.startsWith("已进入")) {
+                    recoverToSelect(epoch, m)
+                    return@start
+                }
+                ClosePopupFlow.start(
+                    this,
+                    status = { FloatingOverlay.setText(it) },
+                    done = { m2 ->
+                        if (!zoneAlive(epoch)) return@start
+                        if (!m2.startsWith("游戏内")) {
+                            recoverToSelect(epoch, m2)
+                            return@start
+                        }
+                        enterFarmAndWork(epoch)
+                    },
+                )
+            },
+        )
+    }
+
+    private fun enterFarmAndWork(epoch: Int) {
+        EnterFarmFlow.start(
+            this,
+            status = { FloatingOverlay.setText(it) },
+            done = { m ->
+                if (!zoneAlive(epoch)) return@start
+                if (!m.startsWith("已进入")) {
+                    recoverToSelect(epoch, m)
+                    return@start
+                }
+                // 先走到雕塑 → 再往前走看左侧植物详情、记录土地状态 → 回到雕塑点齿轮
+                FarmWalkFlow.start(
+                    this,
+                    status = { FloatingOverlay.setText(it) },
+                    done = { m2 ->
+                        if (!zoneAlive(epoch)) return@start
+                        if (!m2.startsWith("已走到")) {
+                            recoverRedoFarm(epoch, m2)
+                            return@start
+                        }
+                        LandScanFlow.start(
+                            this,
+                            status = { FloatingOverlay.setText(it) },
+                            done = { m3 ->
+                                if (!zoneAlive(epoch)) return@start
+                                if (!m3.startsWith("已记录")) {
+                                    recoverRedoFarm(epoch, m3)
+                                    return@start
+                                }
+                                FarmWalkFlow.start(
+                                    this,
+                                    status = { FloatingOverlay.setText(it) },
+                                    done = { m4 ->
+                                        if (!zoneAlive(epoch)) return@start
+                                        if (!m4.startsWith("已打开")) {
+                                            recoverRedoFarm(epoch, m4)
+                                            return@start
+                                        }
+                                        HarvestSetupFlow.start(
+                                            this,
+                                            status = { FloatingOverlay.setText(it) },
+                                            done = { m5 ->
+                                                if (!zoneAlive(epoch)) return@start
+                                                if (!m5.startsWith("一键务农已") && !m5.startsWith("没有需要")) {
+                                                    recoverRedoFarm(epoch, m5)
+                                                    return@start
+                                                }
+                                                FarmWaterFlow.start(
+                                                    this,
+                                                    status = { FloatingOverlay.setText(it) },
+                                                    done = { m6 ->
+                                                        if (!zoneAlive(epoch)) return@start
+                                                        if (!m6.startsWith("浇水完成")) {
+                                                            recoverRedoFarm(epoch, m6)
+                                                            return@start
+                                                        }
+                                                        IO.log(this, "Zone", "本区完成：$m6")
+                                                        nextZone(epoch, first = false)
+                                                    },
+                                                )
+                                            },
+                                        )
+                                    },
+                                )
+                            },
+                        )
+                    },
+                    openSettings = false,
+                )
+            },
+        )
+    }
+
+    // —— 失败恢复：链上失败不再直接终止，按所处场景自动重跑（每区最多恢复 2 次） ——
+
+    /** 恢复统一入口：超限才真正终止报错；恢复流程自己再失败会回到这里递归重试 */
+    private fun zoneRetry(err: String, again: () -> Unit) {
+        if (++zoneTries > 2) {
+            endChain("$err（已恢复 ${zoneTries - 1} 次仍失败，已终止）")
+            return
+        }
+        IO.log(this, "Zone", "失败恢复第 $zoneTries 次：$err")
+        FloatingOverlay.setText("正在恢复重跑…")
+        again()
+    }
+
+    /** 终止发生在大厅（进游戏 / 清弹窗 / 进农场失败）→ 返回选服界面，对当前区重新执行 */
+    private fun recoverToSelect(epoch: Int, err: String) {
+        val acc = zoneAcc
+        val farm = zoneFarm
+        if (acc == null || farm == null) {
+            endChain(err)
+            return
+        }
+        zoneRetry(err) {
+            ReturnToSelectFlow.start(
+                this,
+                status = { FloatingOverlay.setText(it) },
+                done = { m ->
+                    if (!zoneAlive(epoch)) return@start
+                    if (m.startsWith("已回到选区")) enterZone(acc, farm, epoch)
+                    else recoverToSelect(epoch, m)
+                },
+            )
+        }
+    }
+
+    /** 终止发生在农场（走路 / 记录土地 / 设置 / 浇水失败）→ 退出农场，重新进入执行务农 */
+    private fun recoverRedoFarm(epoch: Int, err: String) {
+        zoneRetry(err) {
+            ExitFarmFlow.start(
+                this,
+                status = { FloatingOverlay.setText(it) },
+                done = { m ->
+                    if (!zoneAlive(epoch)) return@start
+                    if (m.startsWith("已退出")) enterFarmAndWork(epoch)
+                    else recoverRedoFarm(epoch, m)
+                },
+            )
+        }
+    }
+
+    private fun zoneAlive(epoch: Int): Boolean {
+        if (FlowControl.cancelEpoch != epoch) {
+            queueRunning.value = false
+            return false
+        }
+        return true
+    }
+
     private fun toast(msg: String) {
         Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+    }
+
+    /** 结束执行链：收起队列状态，悬浮窗显示结果后自动隐藏 */
+    private fun endChain(msg: String) {
+        queueRunning.value = false
+        // 终止原因（含恢复超限）必须落日志，否则真机排查只剩悬浮窗 4 秒一闪而过
+        IO.log(this, "Zone", "执行链结束：$msg")
+        FloatingOverlay.setText(msg)
+        toast(msg)
+        window.decorView.postDelayed({ FloatingOverlay.hide(this) }, 4000)
     }
 
     private fun refreshPerms() {
@@ -606,11 +910,22 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 从后台回来不算「闲置了 5 分钟」，重新起算
+        lastTouchAt = System.currentTimeMillis()
         refreshPerms()
         refreshPermsLater()
         syncAlarm()
         // 悬浮窗只在回到助手时收起，不跟随前台应用变化自动隐藏
         FloatingOverlay.hide(this)
+    }
+
+    /** 屏幕保护的计时基准；黑屏时碰一下立刻恢复界面 */
+    override fun dispatchTouchEvent(ev: MotionEvent?): Boolean {
+        if (ev?.actionMasked == MotionEvent.ACTION_DOWN) {
+            lastTouchAt = System.currentTimeMillis()
+            saverBlack.value = false
+        }
+        return super.dispatchTouchEvent(ev)
     }
 
     /** 从系统设置页返回时 onResume 不一定触发，这里再补一次刷新 */

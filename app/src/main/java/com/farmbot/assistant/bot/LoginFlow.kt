@@ -70,6 +70,10 @@ object LoginFlow {
     private var logoutAttempts = 0
     /** 大厅帧里没找到「换区」入口时的重试次数（换区字号小，OCR 首帧常漏） */
     private var lobbyVisits = 0
+    /** 大厅「开始游戏」比右上角昵称先渲染完：命中首帧后先等 1 秒重拍一帧再读昵称 */
+    private var lobbySettled = false
+    /** 等大厅昵称渲染的时长 */
+    private const val LOBBY_SETTLE_MS = 1000L
     /** 已被其他 QQ 账号占用的 QQ 昵称/游戏身份：挑新身份时要跳过 */
     private var excludeQq: Set<String> = emptySet()
 
@@ -162,6 +166,7 @@ object LoginFlow {
         qqPickerFindScrolls = 0
         qqExpandTries = 0
         qqExpandAt = 0L
+        lobbySettled = false
         resetIdentScan()
         resetQqFind()
         // 已经知道要登哪个 QQ 号、哪个身份时（来自账号卡），退出重登后也不退回清点模式
@@ -402,6 +407,14 @@ object LoginFlow {
         // 6) 已回到游戏大厅：读昵称 → 必要时退出切换账号 → 同步区服 → 回写账号
         val lobby = hit(Ui.GAME_START) ?: hit(Ui.CHANGE_AREA)
         if (fg == GameLauncher.PACKAGE && lobby != null) {
+            // 大厅先画出「开始游戏」，右上角昵称要晚约 1 秒才渲染：命中首帧先等 1 秒重拍，
+            // 否则读到的是空昵称或上一帧残留文字
+            if (!lobbySettled) {
+                lobbySettled = true
+                IO.log(ctx, TAG, "命中大厅首帧，等 ${LOBBY_SETTLE_MS}ms 再读昵称")
+                main.postDelayed({ pollAuto(ctx, acc, next, status, done) }, LOBBY_SETTLE_MS)
+                return
+            }
             handleLobby(ctx, acc, bmp, w, h, lines, status, done)
             return
         }

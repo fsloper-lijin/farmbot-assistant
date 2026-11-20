@@ -41,10 +41,18 @@ object ClosePopupFlow {
      * ≈16s。若真出现 >16s 后才弹的新证据，调回 16+。
      */
     private const val IDLE_DONE = 10
+    /**
+     * 已经处理过弹窗后的收尾窗口：用户反馈「关完所有弹窗还要等 16s 太久」。
+     * 见过弹窗说明加载期已过完，再来的多是连弹（1~2 帧内就出现），5 帧 ≈8s 足够确认；
+     * 从没见过弹窗的仍走 IDLE_DONE=10 等晚弹。
+     */
+    private const val IDLE_DONE_SEEN = 5
     /** 勾选框最多点几枪（差分探测 + 补枪恢复的总上限） */
     private const val MAX_CHECK_TAPS = 4
     private const val COOL_CHECK = 1000L
     private const val COOL_CLOSE = 1500L
+    /** 新手大厅返回钩子最多点几次（点了没关掉就报错，不再卡到总超时） */
+    private const val MAX_NEWBIE_TAPS = 4
     /**
      * 勾选状态「差分法」的变化阈值（1 步采样像素数）。
      * 绝对电平两版都被真机打穿：金色主题未勾=0 还好，蓝色主题未勾整片蓝底 5000+、
@@ -96,6 +104,8 @@ object ClosePopupFlow {
     /** 上一次点勾选框之前测的白像素数；>=0 表示正在等这一枪的验证帧 */
     private var checkBase = -1
     private var closeTaps = 0
+    /** 新手大厅返回钩子已点次数 */
+    private var newbieTaps = 0
     /** 本次执行是否见到过弹窗（决定结束文案） */
     private var seenPopup = false
     private var checkWarned = false
@@ -121,6 +131,7 @@ object ClosePopupFlow {
         checkTaps = 0
         checkBase = -1
         closeTaps = 0
+        newbieTaps = 0
         seenPopup = false
         checkWarned = false
         token = FlowControl.begin("清理游戏弹窗")
@@ -188,24 +199,94 @@ object ClosePopupFlow {
         }
 
         // 新手大厅：新号的全屏活动页（无勾选项、无遮罩、盖住底部导航），不能按锚点行识别。
-        // 标题「新手大厅」在左上角（y<0.15h，聊天栏在底部够不着），关闭走左上返回钩子 ——
-        // 和换区面板/商城同一个 D 形钩子图标，比例坐标实测 (211,91)/2880×1800。
+        // 标题在左上「新手大厅 + ? + 问卷图标」，OCR 稳定读成「新手大厅?园」（437 区实测）。
+        // 位置不能写死 y<0.15h：平板 21:9 上下黑边把游戏内容区整体下移，437 区实测标题
+        // 在 (488,614)/2880×1800 ≈ 0.34h，旧阈值直接漏识别、永远卡「正在进入游戏」。
+        // 放宽到左上半屏（聊天栏在底部、右侧是活动大标题，都够不着这个区域）。
         val newbie = lines.firstOrNull {
             it.text.replace(WS, "").contains("新手大厅") &&
-                it.box.centerY() < bmp.height * 0.15f
+                it.box.centerY() < bmp.height * 0.5f &&
+                it.box.centerX() < bmp.width * 0.45f
         }
         if (newbie != null) {
+            // 新手大厅是进游戏加载完后才弹的：见到它 = 已在游戏内，
+            // 否则它盖住底部导航时 lobbySeen 永远 false，流程卡死到总超时（真机踩过）
+            lobbySeen = true
             seenPopup = true
             idle = 0
             handling = true
+            // 新手大厅上面还可能压一层全屏活动弹窗（「新手豪华登录礼」），
+            // 它只有底部居中的「确定」能关；此时点左上返回钩会被弹窗吃掉，白耗次数。
+            val innerOk = lines.firstOrNull {
+                it.text.replace(WS, "").contains("确定") &&
+                    it.box.centerY() > bmp.height * 0.6f &&
+                    it.box.centerX() > bmp.width * 0.3f &&
+                    it.box.centerX() < bmp.width * 0.7f
+            }
+            if (innerOk != null) {
+                if (newbieTaps >= MAX_NEWBIE_TAPS) {
+                    finish("新手活动弹窗点了 $newbieTaps 次仍未关闭，请手动关闭后重试")
+                    return
+                }
+                if (cool > COOL_CLOSE) {
+                    lastTapAt = now
+                    newbieTaps++
+                    IO.log(
+                        ctx, TAG,
+                        "点击 新手活动弹窗确定 (${innerOk.box.centerX()},${innerOk.box.centerY()}) " +
+                            "第 $newbieTaps 次 :: ${innerOk.text}"
+                    )
+                    BotService.tap(innerOk.box.centerX(), innerOk.box.centerY())
+                    statusCb("正在关闭活动页…")
+                }
+                tick(ctx)
+                return
+            }
+            if (newbieTaps >= MAX_NEWBIE_TAPS) {
+                finish("新手大厅点了 $newbieTaps 次返回仍未关闭，请手动关闭后重试")
+                return
+            }
             if (cool > COOL_CLOSE) {
                 lastTapAt = now
-                val x = (bmp.width * 0.073f).toInt()
-                val y = (bmp.height * 0.05f).toInt()
-                IO.log(ctx, TAG, "点击 新手大厅返回 ($x,$y) :: ${newbie.text}")
+                newbieTaps++
+                // 返回钩子和换区面板/商城同一个 D 形图标，与标题同行、在标题左侧。
+                // 坐标跟着标题走（标题左缘 −0.055w，标题行中 y）：437 区实测钩子 (330,630)，
+                // 即 488−0.055×2880≈330 ✓；写死 (0.073w,0.05h) 在平板上会点进顶部黑边。
+                val x = (newbie.box.left - bmp.width * 0.055f).toInt()
+                    .coerceAtLeast((bmp.width * 0.03f).toInt())
+                val y = newbie.box.centerY()
+                IO.log(ctx, TAG, "点击 新手大厅返回 ($x,$y) 第 $newbieTaps 次 :: ${newbie.text}")
                 BotService.tap(x, y)
                 // 文案不能写「新手大厅」：悬浮窗自己会被 OCR，标题判定按它找行
                 statusCb("正在关闭新手页…")
+            }
+            tick(ctx)
+            return
+        }
+
+        // 健康守护/防沉迷休息提醒：没有 X，只有「确定 / 帮助 / 前往营地」三个按钮，点「确定」继续
+        // （它盖住画面时摇杆和点击全被吃掉，真机 14:27 因此整段走路白跑）
+        val rest = lines.firstOrNull {
+            val t = it.text.replace(WS, "")
+            t.contains("呵护双眼") || t.contains("请您休息")
+        }
+        if (rest != null) {
+            seenPopup = true
+            idle = 0
+            handling = true
+            val ok = lines.firstOrNull { it.text.replace(WS, "").contains("确定") }
+            if (ok != null) {
+                if (checkTaps >= MAX_CHECK_TAPS) {
+                    finish("休息提醒点了 $checkTaps 次仍在，请手动关闭后重试")
+                    return
+                }
+                if (cool > COOL_CLOSE) {
+                    lastTapAt = now
+                    checkTaps++
+                    IO.log(ctx, TAG, "点击 休息提醒确定 (${ok.box.centerX()},${ok.box.centerY()}) 第 $checkTaps 次")
+                    BotService.tap(ok.box.centerX(), ok.box.centerY())
+                    statusCb("正在关闭休息提醒…")
+                }
             }
             tick(ctx)
             return
@@ -254,7 +335,9 @@ object ClosePopupFlow {
             idle = 0
             if (frames % 7 == 0) statusCb("正在进入游戏…")
         }
-        if (lobbySeen && idle >= IDLE_DONE) {
+        // 收尾安静窗口：处理过弹窗的 5 帧（≈8s）就收，没见过弹窗的 10 帧（≈16s）等晚弹
+        val idleTarget = if (seenPopup) IDLE_DONE_SEEN else IDLE_DONE
+        if (lobbySeen && idle >= idleTarget) {
             finish(if (seenPopup) "游戏内弹窗已清理" else "游戏内没有发现弹窗")
             return
         }
@@ -440,7 +523,9 @@ object ClosePopupFlow {
         val left = (w * 0.83f).toInt().coerceIn(0, w - 1)
         val right = (w * 0.985f).toInt().coerceAtLeast(left + 1)
         val top = (h * 0.07f).toInt().coerceIn(0, h - 1)
-        val bottom = (h * 0.36f).toInt().coerceAtLeast(top + 1)
+        // 真机遇到过叉在 0.437h 中部偏上的活动弹窗（「为TA打call」），旧的 0.36h 上限找不到，
+        // 兜底会一直点到「今日内不再弹出」勾选行上。放宽到 0.55h，配套的 0.945w 右缘保护仍生效。
+        val bottom = (h * 0.55f).toInt().coerceAtLeast(top + 1)
         if (right - left < 4 || bottom - top < 4) return null
 
         fun white(x: Int, y: Int): Boolean {

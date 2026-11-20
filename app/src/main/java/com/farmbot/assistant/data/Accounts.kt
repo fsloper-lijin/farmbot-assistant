@@ -5,7 +5,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.util.UUID
-
 enum class LoginType(val label: String, val qr: Boolean) {
     QQ("QQ 登录", false),
     WECHAT("微信登录", false),
@@ -100,33 +99,86 @@ class AccountStore(private val ctx: Context) {
     }
 
     fun save(list: List<Account>) {
-        runCatching {
-            val arr = JSONArray()
-            list.forEach { a ->
-                arr.put(JSONObject().apply {
-                    put("id", a.id)
-                    put("name", a.name)
-                    if (a.qqNick.isNotEmpty()) put("qqNick", a.qqNick)
-                    if (a.qqNo.isNotEmpty()) put("qqNo", a.qqNo)
-                    put("loginType", a.loginType.name)
-                    put("enabled", a.enabled)
-                    if (a.identities.isNotEmpty()) put("identities", JSONArray().apply {
-                        a.identities.forEach { put(it) }
-                    })
-                    put("farms", JSONArray().apply {
-                        a.farms.forEach { f ->
-                            put(JSONObject().apply {
-                                put("id", f.id)
-                                put("server", f.server)
-                                put("role", f.role)
-                                put("level", f.level)
-                                put("enabled", f.enabled)
-                            })
-                        }
-                    })
+        runCatching { file.writeText(toJson(list)) }
+    }
+
+    /** 导出成文本：账号 + 区服 + 勾选状态，可直接存成 .json 文件 */
+    fun toJson(list: List<Account>): String {
+        val arr = JSONArray()
+        list.forEach { a ->
+            arr.put(JSONObject().apply {
+                put("id", a.id)
+                put("name", a.name)
+                if (a.qqNick.isNotEmpty()) put("qqNick", a.qqNick)
+                if (a.qqNo.isNotEmpty()) put("qqNo", a.qqNo)
+                put("loginType", a.loginType.name)
+                put("enabled", a.enabled)
+                if (a.identities.isNotEmpty()) put("identities", JSONArray().apply {
+                    a.identities.forEach { put(it) }
                 })
+                put("farms", JSONArray().apply {
+                    a.farms.forEach { f ->
+                        put(JSONObject().apply {
+                            put("id", f.id)
+                            put("server", f.server)
+                            put("role", f.role)
+                            put("level", f.level)
+                            put("enabled", f.enabled)
+                        })
+                    }
+                })
+            })
+        }
+        return arr.toString(2)
+    }
+
+    /** 解析导入文件；不是合法的账号数组时返回 null（文件被改坏 / 选错文件） */
+    fun parseJson(text: String): List<Account>? = runCatching {
+        val arr = JSONArray(text)
+        (0 until arr.length()).map { i -> parseAccount(arr.getJSONObject(i)) }
+    }.getOrNull()
+}
+
+data class MergeResult(val accounts: List<Account>, val addedAccounts: Int, val addedFarms: Int)
+
+/**
+ * 导入合并：按登录方式 + QQ 号/昵称匹配已有账号，只补本地缺的区服。
+ * 已存在的区服保留本地勾选状态，不用文件里的值覆盖。
+ */
+fun mergeAccounts(local: List<Account>, incoming: List<Account>): MergeResult {
+    val out = local.toMutableList()
+    var addedAccounts = 0
+    var addedFarms = 0
+    incoming.forEach { inc ->
+        val idx = out.indexOfFirst { cur -> sameAccount(cur, inc) }
+        if (idx < 0) {
+            out.add(inc)
+            addedAccounts++
+            addedFarms += inc.farms.size
+        } else {
+            val cur = out[idx]
+            val fresh = inc.farms.filter { f -> cur.farms.none { it.server == f.server && it.role == f.role } }
+            val next = cur.copy(
+                name = cur.name.ifBlank { inc.name },
+                qqNick = cur.qqNick.ifBlank { inc.qqNick },
+                qqNo = cur.qqNo.ifBlank { inc.qqNo },
+                identities = (cur.identities + inc.identities).distinct(),
+                farms = cur.farms + fresh,
+            )
+            if (next != cur) {
+                out[idx] = next
+                addedFarms += fresh.size
             }
-            file.writeText(arr.toString())
         }
     }
+    return MergeResult(out, addedAccounts, addedFarms)
+}
+
+private fun sameAccount(a: Account, b: Account): Boolean {
+    if (a.loginType != b.loginType) return false
+    // 同一台设备导出的文件 id 一致；跨设备时靠 QQ 号 / QQ 昵称 / 游戏昵称认
+    if (a.id == b.id) return true
+    if (a.qqNo.isNotBlank() && a.qqNo == b.qqNo) return true
+    if (a.qqNick.isNotBlank() && a.qqNick == b.qqNick) return true
+    return a.name.isNotBlank() && a.name == b.name
 }

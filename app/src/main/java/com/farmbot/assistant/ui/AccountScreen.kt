@@ -64,6 +64,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -103,12 +104,25 @@ fun AccountScreen(
     /** 自动化是否在跑；决定「停止」按钮是否可点 */
     running: Boolean,
     onStop: () -> Unit,
-    onOpenPerms: () -> Unit,
+    /** 导入账号：从 JSON 备份文件合并账号与区服 */
+    onImport: () -> Unit,
+    /** 导出账号：把当前账号、区服及勾选状态写成 JSON 文件 */
+    onExport: () -> Unit,
     /** 刚点「添加账号」新建的那张卡的 id：只让它播放入场动画 */
     justAddedId: String? = null,
 ) {
-    val farmCount = accounts.sumOf { it.farms.size }
-    val selected = accounts.sumOf { it.activeFarms.size }
+    // 规则页全关（或一键务农三个子功能全关）= 没有任务要执行；农场一个区都没勾 = 没地方执行
+    val prefs = LocalContext.current.getSharedPreferences("farmbot", android.content.Context.MODE_PRIVATE)
+    val anyRuleOn = anyRuleActive(prefs)
+    val anyFarmOn = accounts.any { it.enabled && it.activeFarms.isNotEmpty() }
+    val hint = when {
+        accounts.isEmpty() -> null
+        !anyFarmOn -> "请先勾选区服"
+        // 一键务农开着但子功能全关：别说「没启用任务」，用户会以为开关坏了
+        !anyRuleOn && prefs.getBoolean("rule_harvest", false) -> "一键务农里还没启用子功能"
+        !anyRuleOn -> "请先在规则页启用任务"
+        else -> null
+    }
     val wide = isWideScreen()
     val pad = if (wide) 28.dp else 18.dp
     val gridState = rememberLazyStaggeredGridState()
@@ -127,7 +141,7 @@ fun AccountScreen(
             .background(Bg),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Header(accounts.size, farmCount, selected, onOpenPerms, pad)
+        Header(onImport, onExport, pad)
         val listModifier = Modifier.fillMaxSize()
         // 列表铺满，操作条以半透明浮层压在列表底部：既能一直看见，又不会把页面切成两截
         Box(Modifier.weight(1f).widthIn(max = ContentMaxWidth).fillMaxWidth()) {
@@ -204,8 +218,9 @@ fun AccountScreen(
         }
 
         BottomBar(
-            // 开始执行只按账号列表逐个登录，跟农场/区服选择无关：有账号就能点
-            enabled = accounts.isNotEmpty(),
+            // 有账号、有勾选的区服、规则页至少启用一项，才真的有事可做
+            enabled = accounts.isNotEmpty() && anyFarmOn && anyRuleOn,
+            hint = hint,
             running = running,
             onStart = onStart,
             onStop = onStop,
@@ -221,6 +236,8 @@ fun AccountScreen(
 @Composable
 private fun BottomBar(
     enabled: Boolean,
+    /** 不能开始执行的原因，直接替代按钮文字，避免点了才弹提示 */
+    hint: String?,
     running: Boolean,
     onStart: () -> Unit,
     onStop: () -> Unit,
@@ -245,7 +262,7 @@ private fun BottomBar(
             contentAlignment = Alignment.Center
         ) {
             Text(
-                "开始执行",
+                if (!enabled && hint != null) hint else "开始执行",
                 color = if (enabled) Color(0xFF04262B) else TextTertiary,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Medium
@@ -274,7 +291,7 @@ private fun BottomBar(
 }
 
 @Composable
-private fun Header(accounts: Int, farms: Int, selected: Int, onOpenPerms: () -> Unit, pad: Dp) {
+private fun Header(onImport: () -> Unit, onExport: () -> Unit, pad: Dp) {
     Row(
         modifier = Modifier
             .widthIn(max = ContentMaxWidth)
@@ -287,28 +304,23 @@ private fun Header(accounts: Int, farms: Int, selected: Int, onOpenPerms: () -> 
             Spacer(Modifier.height(4.dp))
             Text("多账号 · 王者农场自动化", color = TextSecondary, fontSize = 12.sp)
         }
-        Box(
-            Modifier
-                .clip(RoundedCornerShape(10.dp))
-                .background(Surface2)
-                .clickable { onOpenPerms() }
-                .padding(horizontal = 10.dp, vertical = 6.dp)
-        ) {
-            Text("权限", color = TextSecondary, fontSize = 12.sp)
-        }
+        HeaderAction("导入", onImport)
         Spacer(Modifier.width(8.dp))
-        Box(
-            Modifier
-                .clip(RoundedCornerShape(10.dp))
-                .background(Cyan.copy(alpha = 0.12f))
-                .padding(horizontal = 10.dp, vertical = 6.dp)
-        ) {
-            Text(
-                if (farms == 0) "$accounts 个账号" else "$accounts 账号 · $selected/$farms 农场",
-                color = Cyan,
-                fontSize = 12.sp
-            )
-        }
+        HeaderAction("导出", onExport)
+    }
+}
+
+/** 右上角的小胶囊按钮：导入 / 导出账号 */
+@Composable
+private fun HeaderAction(label: String, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(Surface2)
+            .clickable { onClick() }
+            .padding(horizontal = 12.dp, vertical = 7.dp)
+    ) {
+        Text(label, color = TextSecondary, fontSize = 12.sp)
     }
 }
 
